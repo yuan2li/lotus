@@ -54,6 +54,8 @@ cmake-build-*
 build
 build-*
 result_*
+*-results/
+control-dependence-results/
 *.a
 *.o
 *.log
