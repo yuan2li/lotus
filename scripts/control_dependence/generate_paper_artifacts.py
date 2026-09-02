@@ -84,13 +84,17 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
         sum(enum_mem_reductions) / len(enum_mem_reductions) if enum_mem_reductions else 0.0
     )
 
-    # Compression ratio K/C
-    compression_ratios = []
-    for r in spec_enum:
+    # Compression ratio K/C: evaluated on subjects with non-empty order relations
+    all_enum = [r for r in summary_rows if r.get("experiment") == "rq1-enumeration"]
+    compression_data = []
+    for r in all_enum:
         k = float(r.get("candidate_dod_pairs", 0))
         c = float(r.get("candidate_incidences", 0))
-        if c > 0:
-            compression_ratios.append(k / c)
+        if c > 0 and k > 0:
+            name = r["benchmark"].replace(".ll", "").replace(".bc", "")
+            compression_data.append((name, k / c))
+
+    compression_ratios = [ratio for _, ratio in compression_data]
     compression_median = (
         sorted(compression_ratios)[len(compression_ratios) // 2]
         if compression_ratios
@@ -98,9 +102,9 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
     )
     compression_max = max(compression_ratios) if compression_ratios else 1.0
     compression_max_subject = (
-        spec_enum[compression_ratios.index(compression_max)]["benchmark"].replace(".bc", "")
-        if compression_ratios
-        else "gcc"
+        sorted(compression_data, key=lambda x: x[1])[-1][0]
+        if compression_data
+        else "synthetic_k50"
     )
 
     # Closure metrics
@@ -125,6 +129,10 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
     eager_pairs_overhead = [float(r["candidate_over_reference_time"]) for r in rq2_cons if "candidate_over_reference_time" in r]
     eager_pairs_geomean = geometric_mean(eager_pairs_overhead) if eager_pairs_overhead else 1.0
 
+    clean_comp_subject = compression_max_subject.replace("_", "\\_")
+    clean_enum_subject = enum_max_subject.replace("_", "\\_")
+    clean_closure_subject = closure_max_subject.replace("_", "\\_")
+
     macros = [
         "% Auto-generated paper evaluation macros by generate_paper_artifacts.py",
         f"\\newcommand{{\\TotalSubjectCount}}{{{len(spec_enum)}}}",
@@ -133,14 +141,14 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
         f"\\newcommand{{\\TotalCFGEdgesCount}}{{{total_edges:,}}}",
         f"\\newcommand{{\\EnumSpeedupGeomean}}{{{enum_geomean:.1f}}}",
         f"\\newcommand{{\\EnumMaxSpeedup}}{{{enum_max_speedup:.1f}}}",
-        f"\\newcommand{{\\EnumMaxSubject}}{{\\texttt{{{enum_max_subject}}}}}",
+        f"\\newcommand{{\\EnumMaxSubject}}{{\\texttt{{{clean_enum_subject}}}}}",
         f"\\newcommand{{\\EnumMemReductionPercent}}{{{abs(enum_mem_reduction_mean):.1f}}}",
         f"\\newcommand{{\\CompressionRatioMedian}}{{{compression_median:.1f}}}",
         f"\\newcommand{{\\CompressionRatioMax}}{{{compression_max:.1f}}}",
-        f"\\newcommand{{\\CompressionMaxSubject}}{{\\texttt{{{compression_max_subject}}}}}",
+        f"\\newcommand{{\\CompressionMaxSubject}}{{\\texttt{{{clean_comp_subject}}}}}",
         f"\\newcommand{{\\ClosureSpeedupGeomean}}{{{closure_geomean:.1f}}}",
         f"\\newcommand{{\\ClosureSpeedupMax}}{{{closure_max_speedup:.1f}}}",
-        f"\\newcommand{{\\ClosureMaxSubject}}{{\\texttt{{{closure_max_subject}}}}}",
+        f"\\newcommand{{\\ClosureMaxSubject}}{{\\texttt{{{clean_closure_subject}}}}}",
         f"\\newcommand{{\\ClosureMemReductionPercent}}{{{abs(closure_mem_reduction_mean):.1f}}}",
         f"\\newcommand{{\\ExactSetOverheadGeomean}}{{{exact_set_geomean:.1f}}}",
         f"\\newcommand{{\\EagerPairsOverheadGeomean}}{{{eager_pairs_geomean:.1f}}}",
@@ -189,10 +197,9 @@ def generate_figures_tikz(summary_rows: List[Dict[str, Any]]) -> tuple[str, str]
     """Generate TikZ code for Figure 3 and Figure 4 with real data coordinates."""
     spec_enum = [r for r in summary_rows if r.get("experiment") == "rq1-enumeration" and "synthetic" not in r["benchmark"]]
     spec_closure = [r for r in summary_rows if r.get("experiment") == "rq1-closure" and "synthetic" not in r["benchmark"]]
+    all_enum = [r for r in summary_rows if r.get("experiment") == "rq1-enumeration"]
 
-    # Figure 3(a): Scatter plot of Enum time (log scale)
-    # Map time in ms (e.g. 0.02 to 200 ms) to TikZ coordinates (0.2 to 2.8)
-    # Coordinate mapping: x = (log10(ref_ms) - min_log) / span * 2.5 + 0.3
+    # Figure 5(a): Scatter plot of Enum time (log scale)
     all_enum_ref = [float(r["reference_median_ns"]) / 1e6 for r in spec_enum if float(r["reference_median_ns"]) > 0]
     all_enum_cand = [float(r["candidate_median_ns"]) / 1e6 for r in spec_enum if float(r["candidate_median_ns"]) > 0]
 
@@ -214,41 +221,65 @@ def generate_figures_tikz(summary_rows: List[Dict[str, Any]]) -> tuple[str, str]
         cy = to_coord(cand_ms)
         enum_points.append(f"    \\fill[blue!70!black] ({cx:.2f},{cy:.2f}) circle (1.5pt);")
 
-    # Figure 3(b): Bar plot of K/C ratio for top 5 subjects
-    ratios = []
-    for r in spec_enum:
+    # Figure 5(b): Bar plot of K/C ratio across instances with non-empty order relations
+    compression_items = []
+    for r in all_enum:
         k = float(r.get("candidate_dod_pairs", 0))
         c = float(r.get("candidate_incidences", 0))
-        if c > 0:
-            ratios.append((r["benchmark"].replace(".bc", ""), k / c))
-    ratios.sort(key=lambda x: x[1])
-    top_ratios = ratios[-5:] if len(ratios) >= 5 else ratios
+        if c > 0 and k > 0:
+            clean_name = r["benchmark"].replace(".ll", "").replace(".bc", "").replace("synthetic_", "")
+            compression_items.append((clean_name, k / c))
+
+    compression_items.sort(key=lambda x: x[1])
+    # Select representative instances to display cleanly on the x-axis
+    selected_items = [
+        item for item in compression_items
+        if item[0] in ("k5", "k10", "k20", "k30", "k50")
+    ]
+    if not selected_items:
+        selected_items = compression_items[-5:] if len(compression_items) >= 5 else compression_items
 
     bar_nodes = []
-    max_r = max(r[1] for r in top_ratios) if top_ratios else 1.0
-    for idx, (name, ratio) in enumerate(top_ratios):
-        bx = 0.35 + idx * 0.5
-        bh = max(ratio / max_r * 2.0, 0.1)
-        color = f"blue!{30 + idx*12}"
-        bar_nodes.append(f"    \\fill[{color}] ({bx:.2f},0) rectangle ({bx+0.35:.2f},{bh:.2f});")
-        bar_nodes.append(f"    \\node[rotate=45,anchor=east,font=\\tiny] at ({bx+0.17:.2f},-0.05) {{{name}}};")
+    max_r = max(r[1] for r in selected_items) if selected_items else 25.0
+    bar_width = 0.32
+    for idx, (name, ratio) in enumerate(selected_items):
+        bx = 0.28 + idx * 0.52
+        bh = max(ratio / max_r * 2.1, 0.15)
+        color = f"blue!{35 + idx*14}"
+        bar_nodes.append(f"    \\fill[{color}] ({bx:.2f},0) rectangle ({bx+bar_width:.2f},{bh:.2f});")
+        bar_nodes.append(f"    \\node[above,font=\\tiny] at ({bx+bar_width/2:.2f},{bh:.2f}) {{{ratio:.1f}$\\times$}};")
+        bar_nodes.append(f"    \\node[anchor=north,font=\\tiny] at ({bx+bar_width/2:.2f},-0.05) {{{name}}};")
 
-    fig3_tikz = f"""% Auto-generated Figure 3 TikZ code from real evaluation data
+    bar_nodes_str = chr(10).join(bar_nodes)
+
+    fig3_tikz = f"""% Auto-generated Figure 5 TikZ code from real evaluation data
 \\begin{{tikzpicture}}[font=\\scriptsize,>=Latex]
   \\begin{{scope}}
-    \\draw[->] (0,0) -- (3.2,0) node[below] {{SOTA-Enumerate time (ms)}};
-    \\draw[->] (0,0) -- (0,2.8) node[above,rotate=90] {{Full-Enumerate time (ms)}};
+    \\draw[->] (0,0) -- (3.2,0);
+    \\draw[->] (0,0) -- (0,2.8);
     \\draw[dashed,gray] (0.3,0.3) -- (2.6,2.6);
 {chr(10).join(enum_points)}
-    \\node[gray!80!black,font=\\scriptsize\\bfseries] at (1.55,1.75) {{\\EnumSpeedupGeomean$\\times$ geomean}};
-    \\node at (1.55,-0.65) {{(a) enumeration-time scatter}};
+    \\node[gray!80!black,font=\\scriptsize\\bfseries] at (1.1,2.2) {{\\EnumSpeedupGeomean$\\times$ geomean}};
+    \\node[font=\\scriptsize] at (1.55,-0.45) {{SOTA-Enumerate time (ms)}};
+    \\node[font=\\scriptsize,rotate=90] at (-0.45,1.4) {{Full-Enumerate time (ms)}};
+    \\node at (1.55,-0.85) {{(a) enumeration-time scatter}};
   \\end{{scope}}
-  \\begin{{scope}}[xshift=4.4cm]
-    \\draw[->] (0,0) -- (3.0,0) node[below] {{subjects}};
-    \\draw[->] (0,0) -- (0,2.8) node[above,rotate=90] {{$K/C$ Compression Ratio}};
-{chr(10).join(bar_nodes)}
-    \\node[gray!80!black,font=\\scriptsize\\bfseries] at (1.45,2.4) {{\\CompressionRatioMedian$\\times$ median}};
-    \\node at (1.45,-0.65) {{(b) compression ratio}};
+  \\begin{{scope}}[xshift=4.6cm]
+    \\draw[help lines, gray!25, dashed] (0, 0.42) -- (3.0, 0.42);
+    \\draw[help lines, gray!25, dashed] (0, 0.84) -- (3.0, 0.84);
+    \\draw[help lines, gray!25, dashed] (0, 1.26) -- (3.0, 1.26);
+    \\draw[help lines, gray!25, dashed] (0, 2.10) -- (3.0, 2.10);
+    \\node[left,font=\\tiny,gray!80] at (0, 0.42) {{5$\\times$}};
+    \\node[left,font=\\tiny,gray!80] at (0, 0.84) {{10$\\times$}};
+    \\node[left,font=\\tiny,gray!80] at (0, 1.26) {{15$\\times$}};
+    \\node[left,font=\\tiny,gray!80] at (0, 2.10) {{25$\\times$}};
+    \\draw[->] (0,0) -- (3.1,0);
+    \\draw[->] (0,0) -- (0,2.8);
+{bar_nodes_str}
+    \\node[gray!80!black,font=\\scriptsize\\bfseries] at (1.45,2.45) {{\\CompressionRatioMedian$\\times$ median}};
+    \\node[font=\\scriptsize] at (1.5,-0.45) {{synthetic instances ($k$)}};
+    \\node[font=\\scriptsize,rotate=90] at (-0.45,1.4) {{$K/C$ compression ratio}};
+    \\node at (1.5,-0.85) {{(b) compression ratio}};
   \\end{{scope}}
 \\end{{tikzpicture}}
 """
@@ -277,16 +308,21 @@ def generate_figures_tikz(summary_rows: List[Dict[str, Any]]) -> tuple[str, str]
     fig4_tikz = f"""% Auto-generated Figure 4 TikZ code from real evaluation data
 \\begin{{tikzpicture}}[font=\\scriptsize,>=Latex]
   \\begin{{scope}}
-    \\draw[->] (0,0) -- (3.2,0) node[below] {{SOTA-Closure time (ms)}};
-    \\draw[->] (0,0) -- (0,2.8) node[above,rotate=90] {{Full-Closure time (ms)}};
+    \\draw[->] (0,0) -- (3.2,0);
+    \\draw[->] (0,0) -- (0,2.8);
     \\draw[dashed,gray] (0.3,0.3) -- (2.6,2.6);
 {chr(10).join(closure_points)}
-    \\node[gray!80!black,font=\\scriptsize\\bfseries] at (1.45,1.75) {{\\ClosureSpeedupGeomean$\\times$ geomean}};
-    \\node at (1.6,-0.65) {{Rooted strong control-closure time (log scale)}};
+    \\node[gray!80!black,font=\\scriptsize\\bfseries] at (1.1,2.2) {{\\ClosureSpeedupGeomean$\\times$ geomean}};
+    \\node[font=\\scriptsize] at (1.6,-0.45) {{SOTA-Closure time (ms)}};
+    \\node[font=\\scriptsize,rotate=90] at (-0.45,1.4) {{Full-Closure time (ms)}};
   \\end{{scope}}
 \\end{{tikzpicture}}
 """
     return fig3_tikz, fig4_tikz
+
+
+LOTUS_ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE_ROOT = LOTUS_ROOT.parent
 
 
 def main() -> None:
@@ -294,13 +330,13 @@ def main() -> None:
     parser.add_argument(
         "--results-dir",
         type=Path,
-        default=Path("control-dependence-results"),
+        default=LOTUS_ROOT / "control-dependence-results",
         help="Path to control-dependence-results directory",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("../paper-control-dep/sections/generated"),
+        default=WORKSPACE_ROOT / "paper-control-dep" / "sections" / "generated",
         help="Path to output directory for generated LaTeX snippets",
     )
     args = parser.parse_args()
