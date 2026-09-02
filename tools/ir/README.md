@@ -45,7 +45,7 @@ LLVM parsing/graph construction from `analysis_ns`. Experiment scripts are
 responsible for repetitions, warmups, aggregation, and baseline/compact
 pairing.
 
-`scripts/evaluate_control_dependence.py` provides that orchestration. It
+`scripts/control_dependence/evaluate_control_dependence.py` provides that orchestration. It
 randomizes baseline/compact run order, performs warmups and repetitions, checks
 output counts, and writes `raw.csv`, `summary.csv`, and `metadata.json`.
 
@@ -68,7 +68,7 @@ build/bin/lotus-ir-control-dependence test.bc \
   --algorithm=compact-closure --seed-index=3 --format=json
 
 # Reproducible multi-input evaluation (use the Release driver).
-scripts/evaluate_control_dependence.py benchmarks/real-world/SPEC2006 \
+scripts/control_dependence/evaluate_control_dependence.py benchmarks/real-world/SPEC2006 \
   --tool build-release/bin/lotus-ir-control-dependence \
   --experiments ntscd,dod-preprocess,dod-enumerate,combined \
   --warmup 3 --repeat 20 --output-dir results/control-dependence

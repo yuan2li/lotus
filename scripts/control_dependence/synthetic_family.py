@@ -30,8 +30,9 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 # Ensure we can import DiGraph from paper-control-dep/compact_dod_reference.py
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT / "paper-control-dep"))
+LOTUS_ROOT = Path(__file__).resolve().parents[2]
+WORKSPACE_ROOT = LOTUS_ROOT.parent
+sys.path.insert(0, str(WORKSPACE_ROOT / "paper-control-dep"))
 
 from compact_dod_reference import DiGraph, CompactDOD
 
@@ -219,7 +220,7 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=PROJECT_ROOT / "lotus" / "benchmarks" / "synthetic",
+        default=LOTUS_ROOT / "benchmarks" / "synthetic",
         help="Directory to store generated synthetic .ll benchmarks",
     )
     parser.add_argument(
@@ -255,7 +256,7 @@ def main() -> None:
     if args.benchmark or not (args.generate_ir or args.generate_suite):
         print("=== Running Synthetic Benchmark (Proposition 5.1 Verification) ===")
         results = benchmark_synthetic(args.k_values)
-        out_csv = PROJECT_ROOT / "synthetic_benchmark_results.csv"
+        out_csv = WORKSPACE_ROOT / "synthetic_benchmark_results.csv"
         with out_csv.open("w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(results[0].keys()))
             writer.writeheader()
