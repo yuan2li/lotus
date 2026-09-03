@@ -183,6 +183,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--output-dir", default="control-dependence-results")
     parser.add_argument(
+        "--seed-count",
+        type=int,
+        default=0,
+        help=(
+            "forward --seed-count=N to the driver: N extra closure seeds spread "
+            "evenly over each function's blocks. An entry-only seed makes the "
+            "closure trivial, so a non-zero value is required for the closure "
+            "task to be non-degenerate"
+        ),
+    )
+    parser.add_argument(
+        "--lower-switch",
+        default="true",
+        choices=("true", "false"),
+        help=(
+            "forward --lower-switch=<true|false> to the driver; lowering "
+            "multiway switches makes them participate in the binary-decision "
+            "DOD analysis assumed by the paper (default true)"
+        ),
+    )
+    parser.add_argument(
         "--keep-going",
         action="store_true",
         help="record failed commands and continue with other inputs",
@@ -263,6 +284,8 @@ def run_driver(
     function: str,
     seed_indices: Sequence[int],
     timeout: float,
+    lower_switch: str,
+    seed_count: int,
 ) -> tuple[dict[str, int | str], int, list[str]]:
     """Execute one algorithm once and retain both analysis and process timing.
 
@@ -276,6 +299,7 @@ def run_driver(
         str(input_path),
         f"--algorithm={algorithm}",
         "--format=csv",
+        f"--lower-switch={lower_switch}",
     ]
     if experiment.visit_pairs:
         # RQ1 enumeration must pay for visiting all K triples on both sides.
@@ -290,6 +314,8 @@ def run_driver(
         # Forward identical seeds to all closure implementations, including
         # Eager-Pairs. The driver adds the distinguished entry automatically.
         command.extend(f"--seed-index={index}" for index in seed_indices)
+        if seed_count > 0:
+            command.append(f"--seed-count={seed_count}")
 
     started = time.perf_counter_ns()
     completed = subprocess.run(
@@ -380,7 +406,42 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     rng = random.Random(args.seed)
     raw_rows: list[dict[str, object]] = []
+    summary_rows: list[dict[str, object]] = []
     failures: list[dict[str, object]] = []
+
+    def flush() -> None:
+        """Rewrite raw.csv/summary.csv/metadata.json with results so far.
+
+        Called after each subject completes so that a mid-run interrupt still
+        leaves a coherent partial artifact on disk.
+        """
+        write_csv(output_dir / "raw.csv", raw_rows)
+        write_csv(output_dir / "summary.csv", summary_rows)
+        (output_dir / "metadata.json").write_text(
+            json.dumps(
+                {
+                    "created_unix": time.time(),
+                    "tool": str(tool),
+                    "inputs": [str(path) for path in inputs],
+                    "experiments": experiment_names,
+                    "repeat": args.repeat,
+                    "warmup": args.warmup,
+                    "seed": args.seed,
+                    "function": args.function,
+                    "seed_indices": args.seed_index,
+                    "lower_switch": args.lower_switch,
+                    "seed_count": args.seed_count,
+                    "python": sys.version,
+                    "platform": platform.platform(),
+                    "failures": failures,
+                    "completed_inputs": len({row["input"] for row in summary_rows}),
+                    "total_inputs": len(inputs),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
 
     # Phase 2: collect paired samples. Each repetition contains exactly one run
     # of each algorithm; the global shuffle mitigates ordering and thermal bias.
@@ -403,6 +464,8 @@ def main() -> int:
                             args.function,
                             args.seed_index,
                             args.timeout,
+                            args.lower_switch,
+                            args.seed_count,
                         )
                     except (RuntimeError, subprocess.TimeoutExpired) as error:
                         if not args.keep_going:
@@ -433,6 +496,8 @@ def main() -> int:
                         args.function,
                         args.seed_index,
                         args.timeout,
+                        args.lower_switch,
+                        args.seed_count,
                     )
                 except (RuntimeError, subprocess.TimeoutExpired) as error:
                     if not args.keep_going:
@@ -472,10 +537,9 @@ def main() -> int:
                     file=sys.stderr,
                 )
 
-    # Phase 3: pair outputs and compute the paper-facing aggregates. Medians are
-    # used for time and peak RSS; IQR records run-to-run variability.
-    summary_rows: list[dict[str, object]] = []
-    for input_path in inputs:
+        # Phase 3 (per subject): pair outputs and compute the paper-facing
+        # aggregates for the subject just finished, then flush to disk so a
+        # mid-run interrupt still leaves a coherent partial artifact.
         for experiment_name in experiment_names:
             experiment = EXPERIMENTS[experiment_name]
             reference = [
@@ -564,28 +628,11 @@ def main() -> int:
                     "candidate_over_reference_memory": memory_candidate_over_reference,
                 }
             )
+        flush()
 
-    # Phase 4: emit the artifact. raw.csv permits re-aggregation; summary.csv is
-    # ready for paper tables/plots; metadata.json captures reproducibility data.
-    write_csv(output_dir / "raw.csv", raw_rows)
-    write_csv(output_dir / "summary.csv", summary_rows)
-    metadata = {
-        "created_unix": time.time(),
-        "tool": str(tool),
-        "inputs": [str(path) for path in inputs],
-        "experiments": experiment_names,
-        "repeat": args.repeat,
-        "warmup": args.warmup,
-        "seed": args.seed,
-        "function": args.function,
-        "seed_indices": args.seed_index,
-        "python": sys.version,
-        "platform": platform.platform(),
-        "failures": failures,
-    }
-    (output_dir / "metadata.json").write_text(
-        json.dumps(metadata, indent=2, sort_keys=True) + "\n"
-    )
+    # Phase 4: rewrite metadata one last time so the final artifact reflects
+    # every completed subject (raw.csv/summary.csv were kept fresh by flush()).
+    flush()
 
     # A compact stdout table makes smoke runs readable without opening the CSV.
     print(

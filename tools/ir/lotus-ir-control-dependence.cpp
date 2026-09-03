@@ -4,19 +4,23 @@
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IRReader/IRReader.h"
+#include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Utils.h"
 
 #include "Analysis/ControlDependence/CompactControlDependence.h"
 #include "Analysis/ControlDependence/ControlClosure.h"
 #include "Analysis/ControlDependence/DOD.h"
 #include "Analysis/ControlDependence/NTSCD.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -52,6 +56,16 @@ cl::list<unsigned> SeedIndices(
     cl::ZeroOrMore);
 cl::opt<std::string> Format("format", cl::desc("text, json, or csv"),
                             cl::init("text"));
+cl::opt<unsigned> SeedCount(
+    "seed-count",
+    cl::desc("Add this many extra closure seeds per function, spread evenly "
+             "over the block list; 0 keeps the entry-only seed (default 0)"),
+    cl::init(0));
+cl::opt<bool> LowerSwitch(
+    "lower-switch",
+    cl::desc("Lower multiway switches to chains of binary branches before "
+             "analysis, so switch decisions participate in DOD (default true)"),
+    cl::init(true));
 
 enum class Algorithm {
   NTSCD2,
@@ -153,6 +167,18 @@ struct FunctionGraph {
         report_fatal_error("seed index outside function " +
                            blocks.front()->getParent()->getName());
       result.insert(graph.getNode(index + 1));
+    }
+    // An entry-only seed makes the closure trivial: a decision joins only when
+    // both sides of its biclique are already present, so a singleton seed can
+    // never fire one. Spread extra seeds evenly so the closure task is
+    // non-degenerate and the sampling stays deterministic across variants.
+    if (SeedCount > 0 && !blocks.empty()) {
+      unsigned count = std::min<unsigned>(SeedCount, blocks.size());
+      for (unsigned i = 0; i < count; ++i) {
+        unsigned index = static_cast<unsigned>(
+            (static_cast<uint64_t>(i) * blocks.size()) / count);
+        result.insert(graph.getNode(index + 1));
+      }
     }
     return result;
   }
@@ -440,7 +466,7 @@ int main(int argc, char **argv) {
   Algorithm algorithm = parseAlgorithm(AlgorithmName);
   if (VisitPairs && !isDOD(algorithm))
     report_fatal_error("--visit-pairs is valid only for DOD algorithms");
-  if (!SeedIndices.empty() && !isClosure(algorithm))
+  if ((!SeedIndices.empty() || SeedCount > 0) && !isClosure(algorithm))
     report_fatal_error("--seed-index is valid only for closure algorithms");
 
   LLVMContext context;
@@ -449,6 +475,14 @@ int main(int argc, char **argv) {
   if (!module) {
     diagnostic.print(argv[0], errs());
     return 1;
+  }
+  // Lower multiway switches to cascades of binary branches so their decisions
+  // become 2-way and participate in DOD analysis (paper TODO 3.1).  Without
+  // this, blocks whose successor count differs from two are skipped.
+  if (LowerSwitch) {
+    legacy::PassManager passes;
+    passes.add(createLowerSwitchPass());
+    passes.run(*module);
   }
   std::vector<Record> records;
   bool found = FunctionName.empty();
