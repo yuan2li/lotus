@@ -56,6 +56,13 @@ build-*
 result_*
 *-results/
 control-dependence-results/
+control-dependence-results-closure/
+
+# Large real-world bitcode suites (~427 MB) used by the control-dependence
+# evaluation. Kept out of the repository; see benchmarks/real-world/README.md
+# for provenance and how to rebuild them. SPEC2006 bitcode stays tracked.
+benchmarks/real-world/coreutils/
+benchmarks/real-world/open/
 *.a
 *.o
 *.log

@@ -28,6 +28,28 @@ def geometric_mean(values: Sequence[float]) -> float:
     return math.exp(sum(math.log(v) for v in clean) / len(clean))
 
 
+def classify_suite(row: Dict[str, Any]) -> str:
+    """Return the benchmark suite of a summary row: SPEC, coreutils, open, synthetic."""
+    input_path = str(row.get("input", ""))
+    name = str(row.get("benchmark", ""))
+    if "synthetic" in input_path or "synthetic" in name:
+        return "synthetic"
+    if "/SPEC2006/" in input_path or "SPEC2006" in input_path:
+        return "SPEC"
+    if "/coreutils/" in input_path:
+        return "coreutils"
+    if "/open/" in input_path:
+        return "open"
+    # Fallback for older CSVs that carried only the benchmark filename.
+    if name.split(".")[0].isdigit():
+        return "SPEC"
+    return "unknown"
+
+
+def is_real_world(row: Dict[str, Any]) -> bool:
+    return classify_suite(row) in {"SPEC", "coreutils", "open"}
+
+
 def read_summary_csv(path: Path) -> List[Dict[str, Any]]:
     rows = []
     if not path.is_file():
@@ -58,11 +80,11 @@ def read_summary_csv(path: Path) -> List[Dict[str, Any]]:
 
 def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
     """Generate LaTeX macros to fill all XX placeholders in paper-control-dep."""
-    # Split real SPEC benchmarks vs synthetic
-    spec_enum = [r for r in summary_rows if r.get("experiment") == "rq1-enumeration" and "synthetic" not in r["benchmark"]]
-    spec_closure = [r for r in summary_rows if r.get("experiment") == "rq1-closure" and "synthetic" not in r["benchmark"]]
-    rq2_card = [r for r in summary_rows if r.get("experiment") == "rq2-cardinality" and "synthetic" not in r["benchmark"]]
-    rq2_cons = [r for r in summary_rows if r.get("experiment") == "rq2-consumption" and "synthetic" not in r["benchmark"]]
+    # Split real-world benchmarks (SPEC + coreutils + open) vs synthetic
+    spec_enum = [r for r in summary_rows if r.get("experiment") == "rq1-enumeration" and is_real_world(r)]
+    spec_closure = [r for r in summary_rows if r.get("experiment") == "rq1-closure" and is_real_world(r)]
+    rq2_card = [r for r in summary_rows if r.get("experiment") == "rq2-cardinality" and is_real_world(r)]
+    rq2_cons = [r for r in summary_rows if r.get("experiment") == "rq2-consumption" and is_real_world(r)]
 
     # Total counts
     total_funcs = sum(int(r.get("functions", 0)) for r in spec_enum)
@@ -157,8 +179,20 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
 
 
 def generate_subjects_table(summary_rows: List[Dict[str, Any]]) -> str:
-    """Generate LaTeX source for Table 2 (Evaluation subjects and sizes)."""
-    spec_enum = [r for r in summary_rows if r.get("experiment") == "rq1-enumeration" and "synthetic" not in r["benchmark"]]
+    """Generate LaTeX source for Table 2 (Evaluation subjects and sizes).
+
+    SPEC CPU2006 is enumerated per subject; the larger coreutils and open
+    suites are collapsed into aggregated rows so the table stays legible.
+    """
+    real_enum = [r for r in summary_rows
+                 if r.get("experiment") == "rq1-enumeration" and is_real_world(r)]
+
+    def sum_int(rows: List[Dict[str, Any]], key: str) -> int:
+        return sum(int(r.get(key, 0)) for r in rows)
+
+    by_suite: Dict[str, List[Dict[str, Any]]] = {"SPEC": [], "coreutils": [], "open": []}
+    for r in real_enum:
+        by_suite.setdefault(classify_suite(r), []).append(r)
 
     lines = [
         "% Auto-generated subjects table for Table 2",
@@ -167,26 +201,33 @@ def generate_subjects_table(summary_rows: List[Dict[str, Any]]) -> str:
         "Subject & Benchmark Suite & Funcs & $|V|$ & $|E|$ & Decisions \\\\",
         "\\midrule",
     ]
-    total_funcs = 0
-    total_nodes = 0
-    total_edges = 0
-    total_decisions = 0
+    for r in sorted(by_suite["SPEC"], key=lambda x: x["benchmark"]):
+        clean = r["benchmark"].replace(".bc", "").replace(".ll", "")
+        lines.append(
+            f"\\texttt{{{clean}}} & SPEC CPU2006 & "
+            f"{int(r.get('functions', 0)):,} & {int(r.get('nodes', 0)):,} & "
+            f"{int(r.get('edges', 0)):,} & {int(r.get('decisions', 0)):,} \\\\"
+        )
+    for suite, label in (("coreutils", "GNU Coreutils"), ("open", "Open-source apps")):
+        rows = by_suite[suite]
+        if not rows:
+            continue
+        lines.append("\\midrule")
+        lines.append(
+            f"{len(rows)} programs & {label} & "
+            f"{sum_int(rows, 'functions'):,} & {sum_int(rows, 'nodes'):,} & "
+            f"{sum_int(rows, 'edges'):,} & {sum_int(rows, 'decisions'):,} \\\\"
+        )
 
-    for r in sorted(spec_enum, key=lambda x: x["benchmark"]):
-        clean_name = r["benchmark"].replace(".bc", "").replace(".ll", "")
-        funcs = int(r.get("functions", 0))
-        nodes = int(r.get("nodes", 0))
-        edges = int(r.get("edges", 0))
-        decisions = int(r.get("decisions", 0))
-        total_funcs += funcs
-        total_nodes += nodes
-        total_edges += edges
-        total_decisions += decisions
-        lines.append(f"\\texttt{{{clean_name}}} & SPEC CPU2006 & {funcs:,} & {nodes:,} & {edges:,} & {decisions:,} \\\\")
-
+    total_funcs = sum_int(real_enum, "functions")
+    total_nodes = sum_int(real_enum, "nodes")
+    total_edges = sum_int(real_enum, "edges")
+    total_decisions = sum_int(real_enum, "decisions")
     lines.extend([
         "\\midrule",
-        f"\\textbf{{Total}} & \\textbf{{{len(spec_enum)} subjects}} & \\textbf{{{total_funcs:,}}} & \\textbf{{{total_nodes:,}}} & \\textbf{{{total_edges:,}}} & \\textbf{{{total_decisions:,}}} \\\\",
+        f"\\textbf{{Total}} & \\textbf{{{len(real_enum)} subjects}} & "
+        f"\\textbf{{{total_funcs:,}}} & \\textbf{{{total_nodes:,}}} & "
+        f"\\textbf{{{total_edges:,}}} & \\textbf{{{total_decisions:,}}} \\\\",
         "\\bottomrule",
         "\\end{tabular}",
     ])
@@ -195,8 +236,8 @@ def generate_subjects_table(summary_rows: List[Dict[str, Any]]) -> str:
 
 def generate_figures_tikz(summary_rows: List[Dict[str, Any]]) -> tuple[str, str]:
     """Generate TikZ code for Figure 3 and Figure 4 with real data coordinates."""
-    spec_enum = [r for r in summary_rows if r.get("experiment") == "rq1-enumeration" and "synthetic" not in r["benchmark"]]
-    spec_closure = [r for r in summary_rows if r.get("experiment") == "rq1-closure" and "synthetic" not in r["benchmark"]]
+    spec_enum = [r for r in summary_rows if r.get("experiment") == "rq1-enumeration" and is_real_world(r)]
+    spec_closure = [r for r in summary_rows if r.get("experiment") == "rq1-closure" and is_real_world(r)]
     all_enum = [r for r in summary_rows if r.get("experiment") == "rq1-enumeration"]
 
     # Figure 5(a): Scatter plot of Enum time (log scale)
@@ -325,6 +366,66 @@ LOTUS_ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE_ROOT = LOTUS_ROOT.parent
 
 
+def generate_closure_family_artifacts(rows: List[Dict[str, Any]]) -> tuple[str, str]:
+    """Macros and a table for the well-formed non-trivial-closure family.
+
+    The real-world subjects all have an empty DOD relation, so they cannot
+    exercise the biclique representation during closure.  This family does: it
+    keeps K = k^3 and C = 2k^2 while making every decision reachable, so the
+    rooted closure is non-trivial (2k+2) and the cubic-vs-quadratic separation
+    becomes measurable end to end.
+    """
+    def k_of(row: Dict[str, Any]) -> int:
+        name = str(row["benchmark"])
+        return int(name.replace("closure_k", "").replace(".ll", ""))
+
+    closure = sorted(
+        (r for r in rows if r.get("experiment") == "rq1-closure"), key=k_of
+    )
+    enum = {k_of(r): r for r in rows if r.get("experiment") == "rq1-enumeration"}
+    eager = {k_of(r): r for r in rows if r.get("experiment") == "rq2-consumption"}
+
+    speedups = [float(r["reference_over_candidate_time"]) for r in closure]
+    geo = geometric_mean(speedups)
+    max_speedup = max(speedups)
+    max_k = k_of(max(closure, key=lambda r: float(r["reference_over_candidate_time"])))
+    eager_overheads = [float(r["candidate_over_reference_time"]) for r in eager.values()]
+
+    macros = [
+        "% Auto-generated closure-family macros by generate_paper_artifacts.py",
+        f"\\newcommand{{\\ClosureFamilyCount}}{{{len(closure)}}}",
+        f"\\newcommand{{\\ClosureFamilyMinK}}{{{k_of(closure[0])}}}",
+        f"\\newcommand{{\\ClosureFamilyMaxK}}{{{k_of(closure[-1])}}}",
+        f"\\newcommand{{\\ClosureFamilySpeedupGeomean}}{{{geo:.0f}}}",
+        f"\\newcommand{{\\ClosureFamilySpeedupMax}}{{{max_speedup:.0f}}}",
+        f"\\newcommand{{\\ClosureFamilySpeedupMaxK}}{{{max_k}}}",
+        f"\\newcommand{{\\ClosureFamilySpeedupMin}}{{{min(speedups):.1f}}}",
+        f"\\newcommand{{\\ClosureFamilyEagerOverheadMax}}{{{max(eager_overheads):.1f}}}",
+        f"\\newcommand{{\\ClosureFamilyMaxTriples}}{{{int(closure[-1]['candidate_dod_pairs']):,}}}",
+        f"\\newcommand{{\\ClosureFamilyMaxClosure}}{{{int(closure[-1]['candidate_output'])}}}",
+    ]
+
+    lines = [
+        "% Auto-generated closure-family table",
+        "\\begin{tabular}{@{}rrrrrrr@{}}",
+        "\\toprule",
+        "$k$ & $K$ & $C$ & $|W'|$ & SOTA (ms) & Full (ms) & Speedup \\\\",
+        "\\midrule",
+    ]
+    for r in closure:
+        k = k_of(r)
+        e = enum[k]
+        lines.append(
+            f"{k} & {int(e['candidate_dod_pairs']):,} & {int(e['candidate_incidences']):,} & "
+            f"{int(r['candidate_output'])} & "
+            f"{float(r['reference_median_ns']) / 1e6:.2f} & "
+            f"{float(r['candidate_median_ns']) / 1e6:.2f} & "
+            f"{float(r['reference_over_candidate_time']):.0f}$\\times$ \\\\"
+        )
+    lines += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -332,6 +433,12 @@ def main() -> None:
         type=Path,
         default=LOTUS_ROOT / "control-dependence-results",
         help="Path to control-dependence-results directory",
+    )
+    parser.add_argument(
+        "--closure-results-dir",
+        type=Path,
+        default=LOTUS_ROOT / "control-dependence-results-closure",
+        help="Path to the non-trivial-closure family results directory",
     )
     parser.add_argument(
         "--output-dir",
@@ -362,6 +469,18 @@ def main() -> None:
     print(f"Written: {args.output_dir / 'fig_rq1_results.tikz'}")
     (args.output_dir / "fig_rq1_closure.tikz").write_text(fig4_tikz)
     print(f"Written: {args.output_dir / 'fig_rq1_closure.tikz'}")
+
+    closure_summary = args.closure_results_dir / "summary.csv"
+    if closure_summary.is_file():
+        closure_rows = read_summary_csv(closure_summary)
+        if closure_rows:
+            cf_macros, cf_table = generate_closure_family_artifacts(closure_rows)
+            (args.output_dir / "closure_family_macros.tex").write_text(cf_macros)
+            print(f"Written: {args.output_dir / 'closure_family_macros.tex'}")
+            (args.output_dir / "tab_closure_family.tex").write_text(cf_table)
+            print(f"Written: {args.output_dir / 'tab_closure_family.tex'}")
+    else:
+        print(f"Note: {closure_summary} not found; skipping closure-family artifacts")
 
 
 if __name__ == "__main__":

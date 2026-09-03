@@ -67,6 +67,79 @@ def build_synthetic_graph(k: int) -> DiGraph:
     return DiGraph(adjacency)
 
 
+def build_closure_graph(k: int) -> DiGraph:
+    """Well-formed variant of Proposition 5.1 used for the closure experiment.
+
+    ``build_synthetic_graph`` places the decisions off the cycle with no
+    predecessors.  Emitted as a CFG that leaves p_1..p_{k-1} unreachable, which
+    any real pipeline would delete and which violates the reachable-start
+    hypothesis of the rooted strong-closure corollary.  A dispatcher chain
+    ``d_i -> {p_i, d_{i+1}}`` makes every decision reachable while preserving
+    ``K = k^3`` triples and ``C = 2k^2`` incidences exactly, and it raises the
+    rooted closure from ``k+2`` to ``2k+2`` so the closure task is non-trivial.
+
+    Vertex indexing:
+    - x_0..x_{k-1}: 0 .. k-1
+    - y_0..y_{k-1}: k .. 2k-1
+    - p_0..p_{k-1}: 2k .. 3k-1
+    - d_0..d_{k-1}: 3k .. 4k-1   (d_0 is the entry)
+    """
+    n = 4 * k
+    adjacency: List[List[int]] = [[] for _ in range(n)]
+    for i in range(k - 1):
+        adjacency[i].append(i + 1)
+    adjacency[k - 1].append(k)  # x_{k-1} -> y_0
+    for j in range(k - 1):
+        adjacency[k + j].append(k + j + 1)
+    adjacency[2 * k - 1].append(0)  # y_{k-1} -> x_0
+    for i in range(k):
+        adjacency[2 * k + i] = [0, k]  # p_i -> x_0, y_0
+    for i in range(k - 1):
+        adjacency[3 * k + i] = [2 * k + i, 3 * k + i + 1]
+    adjacency[4 * k - 1] = [3 * k - 1, 0]  # d_{k-1} -> p_{k-1}, x_0
+    return DiGraph(adjacency)
+
+
+def generate_closure_llvm_ir(k: int) -> str:
+    """Emit the well-formed closure family as LLVM IR.
+
+    Block order defines the ``--seed-index`` space:
+    ``d_0..d_{k-1}`` = 0..k-1 (entry), ``p_*`` = k..2k-1,
+    ``x_*`` = 2k..3k-1, ``y_*`` = 3k..4k-1, so x_1 = 2k+1 and y_1 = 3k+1.
+    """
+    lines = [
+        f"; ModuleID = 'closure_k{k}.ll'",
+        f'source_filename = "closure_k{k}.c"',
+        'target triple = "arm64-apple-macosx"',
+        "",
+        "; Well-formed Proposition 5.1 family: the dispatcher chain makes every",
+        "; decision reachable from the entry, so no block is dead and the rooted",
+        "; strong-closure hypothesis (reachable start) holds.",
+        "define void @closure_func(i32 %cond) {",
+    ]
+    for i in range(k):
+        target = f"d_{i + 1}" if i + 1 < k else "x_0"
+        lines += [
+            f"d_{i}:",
+            f"  %dc_{i} = icmp eq i32 %cond, {i}",
+            f"  br i1 %dc_{i}, label %p_{i}, label %{target}",
+            "",
+        ]
+    for i in range(k):
+        lines += [
+            f"p_{i}:",
+            f"  %pc_{i} = icmp sgt i32 %cond, {i}",
+            f"  br i1 %pc_{i}, label %x_0, label %y_0",
+            "",
+        ]
+    for i in range(k):
+        lines += [f"x_{i}:", f"  br label %{f'x_{i + 1}' if i + 1 < k else 'y_0'}", ""]
+    for j in range(k):
+        lines += [f"y_{j}:", f"  br label %{f'y_{j + 1}' if j + 1 < k else 'x_0'}", ""]
+    lines += ["}", ""]
+    return "\n".join(lines)
+
+
 def generate_synthetic_llvm_ir(k: int) -> str:
     """Generate an LLVM IR module (.ll) matching Proposition 5.1 structure."""
     lines = [
@@ -240,6 +313,14 @@ def main() -> None:
         action="store_true",
         help="Generate synthetic benchmark suite (.ll files) in output-dir",
     )
+    parser.add_argument(
+        "--generate-closure-suite",
+        action="store_true",
+        help=(
+            "Generate the well-formed closure suite (closure_k*.ll) whose "
+            "decisions are all reachable and whose rooted closure is non-trivial"
+        ),
+    )
     args = parser.parse_args()
 
     if args.generate_ir:
@@ -253,7 +334,20 @@ def main() -> None:
             target_file.write_text(generate_synthetic_llvm_ir(k))
             print(f"Generated {target_file} (k={k}, n={3*k}, K={k**3})")
 
-    if args.benchmark or not (args.generate_ir or args.generate_suite):
+    if args.generate_closure_suite:
+        args.output_dir.mkdir(parents=True, exist_ok=True)
+        for k in args.k_values:
+            target_file = args.output_dir / f"closure_k{k}.ll"
+            target_file.write_text(generate_closure_llvm_ir(k))
+            print(
+                f"Generated {target_file} (k={k}, n={4 * k}, K={k**3}, "
+                f"C={2 * k * k}, closure={2 * k + 2}, "
+                f"seeds x_1={2 * k + 1} y_1={3 * k + 1})"
+            )
+
+    if args.benchmark or not (
+        args.generate_ir or args.generate_suite or args.generate_closure_suite
+    ):
         print("=== Running Synthetic Benchmark (Proposition 5.1 Verification) ===")
         results = benchmark_synthetic(args.k_values)
         out_csv = WORKSPACE_ROOT / "synthetic_benchmark_results.csv"

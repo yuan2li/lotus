@@ -18,4 +18,5 @@ target_link_libraries(lotus-ir-control-dependence
   PRIVATE
   CanaryControlDependence
   LLVMIRReader
+  LLVMTransformUtils
 )
