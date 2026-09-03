@@ -73,6 +73,15 @@ Relevant options:
   through a counting callback and performs no per-pair output.
 - ``--function=<name>`` restricts the experiment to one function.
 - ``--seed-index=N`` adds closure seeds; the function entry is always included.
+- ``--seed-count=N`` adds ``N`` closure seeds spread evenly over each function's
+  block list, so seeding does not require per-function block indices. A
+  decision joins the closure only once both sides of its biclique are present,
+  so the default entry-only seed makes the closure trivially the entry itself;
+  pass a non-zero value for a meaningful closure workload.
+- ``--lower-switch=true|false`` (default ``true``) lowers multiway ``switch``
+  instructions to cascades of binary branches before graph extraction, so their
+  decisions participate in the binary-decision DOD analysis instead of being
+  skipped. Disabling it reproduces the untransformed CFG.
 - ``--format=text|json|csv`` selects the output format.
 
 .. toctree::
