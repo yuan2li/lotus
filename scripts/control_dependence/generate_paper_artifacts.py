@@ -105,6 +105,16 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
     enum_mem_reduction_mean = (
         sum(enum_mem_reductions) / len(enum_mem_reductions) if enum_mem_reductions else 0.0
     )
+    # The peak-RSS difference is whole-process and turns out to be within its own
+    # run-to-run spread, so the paper reports it as "no measurable difference"
+    # rather than as a reduction. These macros keep that statement data-driven.
+    import statistics as _stats
+
+    enum_mem_stdev = (
+        _stats.stdev(enum_mem_reductions) if len(enum_mem_reductions) > 1 else 0.0
+    )
+    enum_mem_worse = sum(1 for value in enum_mem_reductions if value < 0)
+    enum_mem_total = len(enum_mem_reductions)
 
     # Compression ratio K/C: evaluated on subjects with non-empty order relations
     all_enum = [r for r in summary_rows if r.get("experiment") == "rq1-enumeration"]
@@ -165,6 +175,9 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
         f"\\newcommand{{\\EnumMaxSpeedup}}{{{enum_max_speedup:.1f}}}",
         f"\\newcommand{{\\EnumMaxSubject}}{{\\texttt{{{clean_enum_subject}}}}}",
         f"\\newcommand{{\\EnumMemReductionPercent}}{{{abs(enum_mem_reduction_mean):.1f}}}",
+        f"\\newcommand{{\\EnumMemStdevPercent}}{{{enum_mem_stdev:.1f}}}",
+        f"\\newcommand{{\\EnumMemWorseCount}}{{{enum_mem_worse}}}",
+        f"\\newcommand{{\\EnumMemSubjectCount}}{{{enum_mem_total}}}",
         f"\\newcommand{{\\CompressionRatioMedian}}{{{compression_median:.1f}}}",
         f"\\newcommand{{\\CompressionRatioMax}}{{{compression_max:.1f}}}",
         f"\\newcommand{{\\CompressionMaxSubject}}{{\\texttt{{{clean_comp_subject}}}}}",
@@ -284,11 +297,13 @@ def generate_figures_tikz(summary_rows: List[Dict[str, Any]]) -> tuple[str, str]
     max_r = max(r[1] for r in selected_items) if selected_items else 25.0
     bar_width = 0.32
     for idx, (name, ratio) in enumerate(selected_items):
-        bx = 0.28 + idx * 0.52
+        # Pitch must exceed the rendered label width: tikz `scale` shrinks
+        # coordinates but not text, so a tight pitch collides once scaled.
+        bx = 0.28 + idx * 0.68
         bh = max(ratio / max_r * 2.1, 0.15)
         color = f"blue!{35 + idx*14}"
         bar_nodes.append(f"    \\fill[{color}] ({bx:.2f},0) rectangle ({bx+bar_width:.2f},{bh:.2f});")
-        bar_nodes.append(f"    \\node[above,font=\\tiny] at ({bx+bar_width/2:.2f},{bh:.2f}) {{{ratio:.1f}$\\times$}};")
+        bar_nodes.append(f"    \\node[above,font=\\tiny] at ({bx+bar_width/2:.2f},{bh:.2f}) {{{ratio:g}$\\times$}};")
         bar_nodes.append(f"    \\node[anchor=north,font=\\tiny] at ({bx+bar_width/2:.2f},-0.05) {{{name}}};")
 
     bar_nodes_str = chr(10).join(bar_nodes)
@@ -303,24 +318,24 @@ def generate_figures_tikz(summary_rows: List[Dict[str, Any]]) -> tuple[str, str]
     \\node[gray!80!black,font=\\scriptsize\\bfseries] at (1.1,2.2) {{\\EnumSpeedupGeomean$\\times$ geomean}};
     \\node[font=\\scriptsize] at (1.55,-0.45) {{SOTA-Enumerate time (ms)}};
     \\node[font=\\scriptsize,rotate=90] at (-0.45,1.4) {{Full-Enumerate time (ms)}};
-    \\node at (1.55,-0.85) {{(a) enumeration-time scatter}};
+    \\node at (1.55,-1.00) {{(a) enumeration-time scatter}};
   \\end{{scope}}
   \\begin{{scope}}[xshift=4.6cm]
-    \\draw[help lines, gray!25, dashed] (0, 0.42) -- (3.0, 0.42);
-    \\draw[help lines, gray!25, dashed] (0, 0.84) -- (3.0, 0.84);
-    \\draw[help lines, gray!25, dashed] (0, 1.26) -- (3.0, 1.26);
-    \\draw[help lines, gray!25, dashed] (0, 2.10) -- (3.0, 2.10);
+    \\draw[help lines, gray!25, dashed] (0, 0.42) -- (3.5, 0.42);
+    \\draw[help lines, gray!25, dashed] (0, 0.84) -- (3.5, 0.84);
+    \\draw[help lines, gray!25, dashed] (0, 1.26) -- (3.5, 1.26);
+    \\draw[help lines, gray!25, dashed] (0, 2.10) -- (3.5, 2.10);
     \\node[left,font=\\tiny,gray!80] at (0, 0.42) {{5$\\times$}};
     \\node[left,font=\\tiny,gray!80] at (0, 0.84) {{10$\\times$}};
     \\node[left,font=\\tiny,gray!80] at (0, 1.26) {{15$\\times$}};
     \\node[left,font=\\tiny,gray!80] at (0, 2.10) {{25$\\times$}};
-    \\draw[->] (0,0) -- (3.1,0);
+    \\draw[->] (0,0) -- (3.7,0);
     \\draw[->] (0,0) -- (0,2.8);
 {bar_nodes_str}
-    \\node[gray!80!black,font=\\scriptsize\\bfseries] at (1.45,2.45) {{\\CompressionRatioMedian$\\times$ median}};
-    \\node[font=\\scriptsize] at (1.5,-0.45) {{synthetic instances ($k$)}};
-    \\node[font=\\scriptsize,rotate=90] at (-0.45,1.4) {{$K/C$ compression ratio}};
-    \\node at (1.5,-0.85) {{(b) compression ratio}};
+    \\node[gray!80!black,font=\\scriptsize\\bfseries] at (1.85,2.45) {{\\CompressionRatioMedian$\\times$ median}};
+    \\node[font=\\scriptsize] at (1.85,-0.62) {{synthetic instances ($k$)}};
+    \\node[font=\\scriptsize,rotate=90] at (-0.95,1.4) {{$K/C$ compression ratio}};
+    \\node at (1.85,-1.00) {{(b) compression ratio}};
   \\end{{scope}}
 \\end{{tikzpicture}}
 """
