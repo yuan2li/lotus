@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <numeric>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -60,6 +61,13 @@ cl::opt<unsigned> SeedCount(
     "seed-count",
     cl::desc("Add this many extra closure seeds per function, spread evenly "
              "over the block list; 0 keeps the entry-only seed (default 0)"),
+    cl::init(0));
+cl::opt<unsigned> SeedRng(
+    "seed-rng",
+    cl::desc("When non-zero, --seed-count draws pseudo-random seeds with this "
+             "RNG seed instead of an even spread. The draw is deterministic "
+             "per function, so paired variants receive identical seeds "
+             "(default 0 = even spread)"),
     cl::init(0));
 cl::opt<bool> LowerSwitch(
     "lower-switch",
@@ -174,10 +182,36 @@ struct FunctionGraph {
     // non-degenerate and the sampling stays deterministic across variants.
     if (SeedCount > 0 && !blocks.empty()) {
       unsigned count = std::min<unsigned>(SeedCount, blocks.size());
-      for (unsigned i = 0; i < count; ++i) {
-        unsigned index = static_cast<unsigned>(
-            (static_cast<uint64_t>(i) * blocks.size()) / count);
-        result.insert(graph.getNode(index + 1));
+      if (SeedRng == 0) {
+        for (unsigned i = 0; i < count; ++i) {
+          unsigned index = static_cast<unsigned>(
+              (static_cast<uint64_t>(i) * blocks.size()) / count);
+          result.insert(graph.getNode(index + 1));
+        }
+      } else {
+        // An even spread can align with a benchmark's block layout and so
+        // overstate the closure workload. Drawing the seeds instead measures
+        // how the result varies with seed placement. The stream is derived
+        // from the RNG seed and the function name, so it is reproducible and
+        // identical across the paired variants.
+        auto mix = [](uint64_t v) {
+          v += 0x9e3779b97f4a7c15ULL;
+          v = (v ^ (v >> 30)) * 0xbf58476d1ce4e5b9ULL;
+          v = (v ^ (v >> 27)) * 0x94d049bb133111ebULL;
+          return v ^ (v >> 31);
+        };
+        uint64_t state = mix(SeedRng);
+        for (char c : blocks.front()->getParent()->getName())
+          state = mix(state ^ static_cast<uint64_t>(
+                                  static_cast<unsigned char>(c)));
+        std::vector<unsigned> order(blocks.size());
+        std::iota(order.begin(), order.end(), 0u);
+        for (unsigned i = 0; i < count; ++i) {
+          state = mix(state);
+          unsigned j = i + static_cast<unsigned>(state % (order.size() - i));
+          std::swap(order[i], order[j]);
+          result.insert(graph.getNode(order[i] + 1));
+        }
       }
     }
     return result;
@@ -466,7 +500,7 @@ int main(int argc, char **argv) {
   Algorithm algorithm = parseAlgorithm(AlgorithmName);
   if (VisitPairs && !isDOD(algorithm))
     report_fatal_error("--visit-pairs is valid only for DOD algorithms");
-  if ((!SeedIndices.empty() || SeedCount > 0) && !isClosure(algorithm))
+  if ((!SeedIndices.empty() || SeedCount > 0 || SeedRng > 0) && !isClosure(algorithm))
     report_fatal_error("--seed-index is valid only for closure algorithms");
 
   LLVMContext context;
