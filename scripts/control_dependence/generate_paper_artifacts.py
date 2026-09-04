@@ -426,6 +426,59 @@ def generate_closure_family_artifacts(rows: List[Dict[str, Any]]) -> tuple[str, 
     return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
 
 
+def generate_seed_sweep_artifacts(
+    summary: List[Dict[str, Any]], raw: List[Dict[str, Any]]
+) -> tuple[str, str]:
+    """Macros and a table for the closure seed-set sensitivity sweep.
+
+    Reporting one seeding is fragile: an even spread can align with a
+    benchmark's block layout and land near the best case.  This summarises the
+    distribution over randomly drawn seed sets instead.
+    """
+    import statistics
+
+    sizes = sorted({int(r["seed_count"]) for r in summary})
+    non_degenerate = [r for r in raw if int(r["seed_count"]) >= 4]
+    speedups = sorted(float(r["speedup"]) for r in non_degenerate)
+    median = statistics.median(speedups)
+    q1 = speedups[len(speedups) // 4]
+    q3 = speedups[3 * len(speedups) // 4]
+
+    macros = [
+        "% Auto-generated closure seed-sweep macros by generate_paper_artifacts.py",
+        f"\\newcommand{{\\ClosureSweepTrials}}{{{len(non_degenerate)}}}",
+        f"\\newcommand{{\\ClosureSweepMedian}}{{{median:.0f}}}",
+        f"\\newcommand{{\\ClosureSweepQOne}}{{{q1:.0f}}}",
+        f"\\newcommand{{\\ClosureSweepQThree}}{{{q3:.0f}}}",
+        f"\\newcommand{{\\ClosureSweepMin}}{{{min(speedups):.1f}}}",
+        f"\\newcommand{{\\ClosureSweepMax}}{{{max(speedups):.0f}}}",
+        f"\\newcommand{{\\ClosureSweepSizeMin}}{{{min(sizes)}}}",
+        f"\\newcommand{{\\ClosureSweepSizeMax}}{{{max(sizes)}}}",
+        f"\\newcommand{{\\ClosureSweepDrawsPerCell}}{{"
+        f"{max(int(r['trials']) for r in summary)}}}",
+    ]
+
+    lines = [
+        "% Auto-generated closure seed-sweep table",
+        "\\begin{tabular}{@{}rrrr@{}}",
+        "\\toprule",
+        "$|W|$ & Median speedup & Range & Median $|W'|$ \\\\",
+        "\\midrule",
+    ]
+    for size in sizes:
+        cells = [r for r in summary if int(r["seed_count"]) == size]
+        med = statistics.median(float(r["speedup_median"]) for r in cells)
+        lo = min(float(r["speedup_min"]) for r in cells)
+        hi = max(float(r["speedup_max"]) for r in cells)
+        closure = statistics.median(float(r["closure_median"]) for r in cells)
+        lines.append(
+            f"{size} & {med:.0f}$\\times$ & "
+            f"{lo:.1f}--{hi:.0f}$\\times$ & {closure:.0f} \\\\"
+        )
+    lines += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -481,6 +534,19 @@ def main() -> None:
             print(f"Written: {args.output_dir / 'tab_closure_family.tex'}")
     else:
         print(f"Note: {closure_summary} not found; skipping closure-family artifacts")
+
+    sweep_summary = args.closure_results_dir / "closure_seed_sweep.csv"
+    sweep_raw = args.closure_results_dir / "closure_seed_sweep_raw.csv"
+    if sweep_summary.is_file() and sweep_raw.is_file():
+        sw_macros, sw_table = generate_seed_sweep_artifacts(
+            read_summary_csv(sweep_summary), read_summary_csv(sweep_raw)
+        )
+        (args.output_dir / "closure_sweep_macros.tex").write_text(sw_macros)
+        print(f"Written: {args.output_dir / 'closure_sweep_macros.tex'}")
+        (args.output_dir / "tab_closure_sweep.tex").write_text(sw_table)
+        print(f"Written: {args.output_dir / 'tab_closure_sweep.tex'}")
+    else:
+        print(f"Note: {sweep_summary} not found; skipping seed-sweep artifacts")
 
 
 if __name__ == "__main__":
