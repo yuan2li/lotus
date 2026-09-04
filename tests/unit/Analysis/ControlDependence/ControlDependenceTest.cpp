@@ -8,6 +8,7 @@
 #include "llvm/Support/SourceMgr.h"
 
 #include "Analysis/ControlDependence/CompactControlDependence.h"
+#include "Analysis/ControlDependence/ControlClosure.h"
 #include "Analysis/ControlDependence/DOD.h"
 #include "Analysis/ControlDependence/ICFGControlDependence.h"
 #include "IR/ICFG/ICFG.h"
@@ -706,6 +707,129 @@ TEST(ControlDependenceTest, ICFGAdapterExposesCompactDODBicliques) {
   EXPECT_TRUE(analysis.isDOD(entry, blueBody, redBody));
   auto closure = analysis.getDependencyClosure({blueBody, redBody});
   EXPECT_NE(std::find(closure.begin(), closure.end(), entry), closure.end());
+}
+
+// Helpers for the strong-closure differential tests below.
+std::set<unsigned> closureIDs(const lotus::cd::detail::NodeSet &nodes) {
+  std::set<unsigned> result;
+  for (auto *node : nodes)
+    result.insert(node->getID());
+  return result;
+}
+
+// Whether every vertex is reachable from the start, which is the hypothesis
+// the rooted strong-closure corollary requires.
+bool allReachableFromStart(lotus::cd::detail::Graph &graph,
+                           lotus::cd::detail::GraphNode *start) {
+  std::set<lotus::cd::detail::GraphNode *> seen{start};
+  std::vector<lotus::cd::detail::GraphNode *> stack{start};
+  while (!stack.empty()) {
+    auto *node = stack.back();
+    stack.pop_back();
+    for (auto *successor : node->successors())
+      if (seen.insert(successor).second)
+        stack.push_back(successor);
+  }
+  return seen.size() == graph.size();
+}
+
+// The evaluation pairs SOTA-Closure with Full-Closure and reports their times
+// as like-for-like, which presumes they return the same set. Nothing tested
+// that: the C++ suite only compared the compact closure against Eager-Pairs,
+// and the reference validator only compared it against explicit pair closure,
+// so both sides of every existing check were this paper's own semantics.
+TEST(ControlDependenceTest, StrongAndCompactClosureAgreeOnReachableGraphs) {
+  constexpr unsigned nodeCount = 4;
+  constexpr unsigned graphCount = 1u << (nodeCount * nodeCount);
+  unsigned reachableGraphs = 0;
+  unsigned graphsWithOrderRelation = 0;
+  unsigned comparisons = 0;
+
+  for (unsigned mask = 0; mask < graphCount; ++mask) {
+    lotus::cd::detail::Graph graph;
+    std::vector<lotus::cd::detail::GraphNode *> nodes;
+    for (unsigned index = 0; index < nodeCount; ++index)
+      nodes.push_back(&graph.createNode());
+    for (unsigned source = 0; source < nodeCount; ++source)
+      for (unsigned target = 0; target < nodeCount; ++target)
+        if (mask & (1u << (source * nodeCount + target)))
+          graph.addEdge(*nodes[source], *nodes[target]);
+
+    if (!allReachableFromStart(graph, nodes[0]))
+      continue;
+    ++reachableGraphs;
+
+    auto inevitability = lotus::cd::detail::computeInevitability(graph);
+    auto ntscd = lotus::cd::detail::computeCompactNTSCD(graph, inevitability);
+    auto bicliques = lotus::cd::detail::computeCompactDOD(graph, inevitability);
+    if (!bicliques.empty())
+      ++graphsWithOrderRelation;
+
+    for (unsigned seedMask = 0; seedMask < (1u << nodeCount); ++seedMask) {
+      // The start is always part of the seed, matching the driver and the
+      // corollary's rooted hypothesis.
+      lotus::cd::detail::NodeSet seed;
+      seed.insert(nodes[0]);
+      for (unsigned index = 1; index < nodeCount; ++index)
+        if (seedMask & (1u << index))
+          seed.insert(nodes[index]);
+
+      auto sota = lotus::cd::detail::computeStrongControlClosure(graph, seed);
+      auto full = lotus::cd::detail::computeCompactDependencyClosure(
+          graph, seed, ntscd, bicliques);
+      ASSERT_EQ(closureIDs(sota), closureIDs(full))
+          << "graph mask " << mask << ", seed mask " << seedMask;
+      ++comparisons;
+    }
+  }
+
+  EXPECT_GT(reachableGraphs, 0u);
+  EXPECT_GT(comparisons, 0u);
+  // Without this the sweep could pass vacuously: the order relation is empty on
+  // every reducible graph, so a suite that never reaches a non-empty one would
+  // agree trivially and prove nothing about the biclique path.
+  EXPECT_GT(graphsWithOrderRelation, 0u)
+      << "no graph in the sweep had a non-empty order relation";
+}
+
+// The agreement above is conditional, not universal. dg's algorithm walks
+// forward from the seed, so a decision that no path reaches is invisible to it,
+// while the relation-based closure still admits it. Unreachable vertices are
+// exactly what the corollary's reachable-start hypothesis excludes, and a CFG
+// that reaches this analysis after dead-code elimination cannot contain them.
+TEST(ControlDependenceTest, StrongClosureMissesUnreachableDecisions) {
+  lotus::cd::detail::Graph graph;
+  std::vector<lotus::cd::detail::GraphNode *> nodes;
+  for (unsigned index = 0; index < 6; ++index)
+    nodes.push_back(&graph.createNode());
+
+  // 1 -> 2 -> 3 -> 1 is a cycle; 0 is the start; 4 and 5 are decisions that
+  // enter the cycle at two different points but have no predecessor.
+  graph.addEdge(*nodes[0], *nodes[1]);
+  graph.addEdge(*nodes[1], *nodes[2]);
+  graph.addEdge(*nodes[2], *nodes[3]);
+  graph.addEdge(*nodes[3], *nodes[1]);
+  graph.addEdge(*nodes[4], *nodes[1]);
+  graph.addEdge(*nodes[4], *nodes[3]);
+  graph.addEdge(*nodes[5], *nodes[1]);
+  graph.addEdge(*nodes[5], *nodes[3]);
+
+  ASSERT_FALSE(allReachableFromStart(graph, nodes[0]));
+
+  auto inevitability = lotus::cd::detail::computeInevitability(graph);
+  auto ntscd = lotus::cd::detail::computeCompactNTSCD(graph, inevitability);
+  auto bicliques = lotus::cd::detail::computeCompactDOD(graph, inevitability);
+
+  lotus::cd::detail::NodeSet seed;
+  for (unsigned index : {0u, 1u, 3u})
+    seed.insert(nodes[index]);
+
+  auto sota = lotus::cd::detail::computeStrongControlClosure(graph, seed);
+  auto full = lotus::cd::detail::computeCompactDependencyClosure(
+      graph, seed, ntscd, bicliques);
+  // Documented divergence: the compact closure is the larger set because it
+  // admits the unreachable decisions that the forward walk never visits.
+  EXPECT_LT(closureIDs(sota).size(), closureIDs(full).size());
 }
 
 } // namespace
