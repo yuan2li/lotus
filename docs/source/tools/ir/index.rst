@@ -73,6 +73,11 @@ Relevant options:
   through a counting callback and performs no per-pair output.
 - ``--function=<name>`` restricts the experiment to one function.
 - ``--seed-index=N`` adds closure seeds; the function entry is always included.
+- ``--lower-switch`` (off by default) lowers multiway ``switch`` instructions to
+  cascades of binary branches before graph extraction, so their decisions
+  participate in the binary-decision DOD analysis instead of being skipped.
+  Because it rewrites the CFG, it also changes the reported node, edge, and
+  decision counts.
 - ``--format=text|json|csv`` selects the output format.
 
 .. toctree::
