@@ -18,6 +18,7 @@ target_link_libraries(lotus-ir-control-dependence
   PRIVATE
   CanaryControlDependence
   LLVMIRReader
+  LLVMTransformUtils
 )
 
 add_executable(lotus-ir-usetracessa lotus-ir-usetracessa.cpp)
