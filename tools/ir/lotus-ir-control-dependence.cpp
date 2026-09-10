@@ -4,13 +4,16 @@
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IRReader/IRReader.h"
+#include "llvm/Pass.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/InitLLVM.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Transforms/Utils.h"
 
 #include "Analysis/ControlDependence/CompactControlDependence.h"
 #include "Analysis/ControlDependence/ControlClosure.h"
@@ -52,6 +55,11 @@ cl::list<unsigned> SeedIndices(
     cl::ZeroOrMore);
 cl::opt<std::string> Format("format", cl::desc("text, json, or csv"),
                             cl::init("text"));
+cl::opt<bool> LowerSwitch(
+    "lower-switch",
+    cl::desc("Lower multiway switches to chains of binary branches before "
+             "analysis, so switch decisions participate in DOD"),
+    cl::init(false));
 
 enum class Algorithm {
   NTSCD2,
@@ -449,6 +457,14 @@ int main(int argc, char **argv) {
   if (!module) {
     diagnostic.print(argv[0], errs());
     return 1;
+  }
+  // DOD considers only two-way decisions, so a switch is otherwise skipped.
+  // Lowering turns it into a cascade of binary branches that DOD does see, at
+  // the cost of changing the CFG, so it is opt-in.
+  if (LowerSwitch) {
+    legacy::PassManager passes;
+    passes.add(createLowerSwitchPass());
+    passes.run(*module);
   }
   std::vector<Record> records;
   bool found = FunctionName.empty();
