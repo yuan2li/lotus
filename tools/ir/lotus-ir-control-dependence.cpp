@@ -20,8 +20,10 @@
 #include "Analysis/ControlDependence/DOD.h"
 #include "Analysis/ControlDependence/NTSCD.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -53,6 +55,18 @@ cl::list<unsigned> SeedIndices(
     "seed-index",
     cl::desc("Extra zero-based closure seed; entry is always included"),
     cl::ZeroOrMore);
+cl::opt<unsigned> SeedCount(
+    "seed-count",
+    cl::desc("Add this many extra closure seeds per function, spread evenly "
+             "over the block list; 0 keeps the entry-only seed (default 0)"),
+    cl::init(0));
+cl::opt<unsigned> SeedRng(
+    "seed-rng",
+    cl::desc("With --seed-count, draw the seeds pseudo-randomly from this RNG "
+             "seed instead of spreading them evenly. The draw is deterministic "
+             "per function, so every algorithm receives the same seeds "
+             "(default 0 = even spread)"),
+    cl::init(0));
 cl::opt<std::string> Format("format", cl::desc("text, json, or csv"),
                             cl::init("text"));
 cl::opt<bool> LowerSwitch(
@@ -133,6 +147,14 @@ bool isClosure(Algorithm a) {
          a == Algorithm::CompactClosureEagerPairs;
 }
 
+// splitmix64 finalizer, used for result fingerprints and seed sampling.
+uint64_t mixFingerprint(uint64_t value) {
+  value += 0x9e3779b97f4a7c15ULL;
+  value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+  return value ^ (value >> 31);
+}
+
 struct FunctionGraph {
   Graph graph;
   std::vector<const BasicBlock *> blocks;
@@ -161,6 +183,35 @@ struct FunctionGraph {
         report_fatal_error("seed index outside function " +
                            blocks.front()->getParent()->getName());
       result.insert(graph.getNode(index + 1));
+    }
+    // A decision joins the closure only once both sides of its biclique are
+    // present, so an entry-only seed never admits one and the closure is just
+    // the entry. --seed-count adds seeds so the closure has work to do. Both
+    // draws are deterministic, so every algorithm sees the same seed set.
+    if (SeedCount > 0 && !blocks.empty()) {
+      unsigned count = std::min<unsigned>(SeedCount, blocks.size());
+      if (SeedRng == 0) {
+        for (unsigned i = 0; i < count; ++i) {
+          unsigned index = static_cast<unsigned>(
+              (static_cast<uint64_t>(i) * blocks.size()) / count);
+          result.insert(graph.getNode(index + 1));
+        }
+      } else {
+        // An even spread can line up with a generated benchmark's block
+        // layout. Instead, take a partial Fisher-Yates shuffle driven by a
+        // stream keyed on the RNG seed and the function name.
+        uint64_t state = mixFingerprint(SeedRng);
+        for (char c : blocks.front()->getParent()->getName())
+          state = mixFingerprint(state ^ static_cast<unsigned char>(c));
+        std::vector<unsigned> order(blocks.size());
+        std::iota(order.begin(), order.end(), 0u);
+        for (unsigned i = 0; i < count; ++i) {
+          state = mixFingerprint(state);
+          unsigned j = i + static_cast<unsigned>(state % (order.size() - i));
+          std::swap(order[i], order[j]);
+          result.insert(graph.getNode(order[i] + 1));
+        }
+      }
     }
     return result;
   }
@@ -196,13 +247,6 @@ struct Record {
       closureNS{};
   uint64_t peakRSSKB{}, resultFingerprint{};
 };
-
-uint64_t mixFingerprint(uint64_t value) {
-  value += 0x9e3779b97f4a7c15ULL;
-  value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
-  value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
-  return value ^ (value >> 31);
-}
 
 uint64_t pairFingerprint(GraphNode *decision, GraphNode *first,
                          GraphNode *second) {
@@ -448,8 +492,12 @@ int main(int argc, char **argv) {
   Algorithm algorithm = parseAlgorithm(AlgorithmName);
   if (VisitPairs && !isDOD(algorithm))
     report_fatal_error("--visit-pairs is valid only for DOD algorithms");
-  if (!SeedIndices.empty() && !isClosure(algorithm))
-    report_fatal_error("--seed-index is valid only for closure algorithms");
+  if ((!SeedIndices.empty() || SeedCount > 0 || SeedRng > 0) &&
+      !isClosure(algorithm))
+    report_fatal_error("--seed-index, --seed-count, and --seed-rng are valid "
+                       "only for closure algorithms");
+  if (SeedRng > 0 && SeedCount == 0)
+    report_fatal_error("--seed-rng requires --seed-count");
 
   LLVMContext context;
   SMDiagnostic diagnostic;
