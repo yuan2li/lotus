@@ -92,10 +92,14 @@ Interpretation
 
 DOD is represented as a binary over-approximation of its underlying ternary
 relation, as in dg. The migrated DOD implementation accepts binary predicates;
-multi-way switches are skipped. The original Ranganath NTSCD variant is known
-to be incorrect and is exposed only for parity and experimentation. For a graph
-with ``n`` vertices and ``m`` edges, compact preprocessing takes ``O(n(n+m))``
-time; on binary CFGs this is ``O(n^2)``. Exact enumeration of ``K`` DOD triples
-takes ``O(n(n+m)+K)``, while membership does not enumerate pairs.
+multi-way switches are skipped at this layer. Callers that need switch
+decisions to participate should lower them first, for example with
+``lotus-ir-control-dependence --lower-switch``. Compact NTSCD, by contrast,
+handles multiway decisions directly. The original Ranganath NTSCD variant is
+known to be incorrect and is exposed only for parity and experimentation. For a
+graph with ``n`` vertices and ``m`` edges, compact preprocessing takes
+``O(n(n+m))`` time; on binary CFGs this is ``O(n^2)``. Exact enumeration of
+``K`` DOD triples takes ``O(n(n+m)+K)``, while membership does not enumerate
+pairs.
 
 See also :doc:`cfg` and :doc:`../tools/ir/index`.
