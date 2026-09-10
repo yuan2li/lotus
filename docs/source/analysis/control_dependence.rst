@@ -107,4 +107,8 @@ are already in the set, so a singleton seed can never trigger one. Seeding with
 the function entry alone therefore returns just that entry; a non-degenerate
 closure needs a seed that straddles both sides.
 
+DOD is empty on reducible graphs, and LLVM front ends emit essentially
+reducible CFGs, so the relation is empty on ordinary compiled code. Non-empty
+bicliques require irreducible control flow or multi-entry loops.
+
 See also :doc:`cfg` and :doc:`../tools/ir/index`.
