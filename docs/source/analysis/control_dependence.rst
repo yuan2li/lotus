@@ -102,4 +102,9 @@ graph with ``n`` vertices and ``m`` edges, compact preprocessing takes
 ``K`` DOD triples takes ``O(n(n+m)+K)``, while membership does not enumerate
 pairs.
 
+``getDependencyClosure`` admits a decision only when both sides of its biclique
+are already in the set, so a singleton seed can never trigger one. Seeding with
+the function entry alone therefore returns just that entry; a non-degenerate
+closure needs a seed that straddles both sides.
+
 See also :doc:`cfg` and :doc:`../tools/ir/index`.
