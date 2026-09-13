@@ -11,7 +11,7 @@ scripts for Lotus control-dependence analysis.
 | `synthetic_family.py` | Generator and theoretical validator for the Proposition 5.1 synthetic graph family. Emits LLVM IR (`.ll`) benchmarks exhibiting cubic output ($K = k^3$) with quadratic bicliques ($C = 2k^2$). |
 | `generate_paper_artifacts.py` | Post-processing pipeline. Reads `summary.csv`, aggregates statistics, and automatically generates LaTeX macros (`paper_macros.tex`), subjects table (`tab_subjects.tex`), and TikZ figures (`fig_rq1_results.tikz`, `fig_rq1_closure.tikz`). |
 | `sweep_closure_seeds.py` | Sweeps the closure seed-set size `|W|` over the `closure_k*.ll` family with randomly drawn seeds, reporting the speedup distribution rather than one seeding. Emits `closure_seed_sweep{,_raw}.csv`. |
-| `function_size_distribution.py` | Re-runs the Full variants over the evaluated real-world subjects and reports how many functions have at most 127 CFG vertices (the `SparseBitVector` single-element fast path) and how much analysis time falls in larger functions. Emits `function_sizes.csv` and `function_size_macros.tex`. |
+| `function_size_distribution.py` | Re-runs the Full variants over the evaluated real-world subjects and describes the per-function CFG size distribution: size percentiles and, per size bucket, the share of functions, vertices, and Full-Enumerate/Full-Closure analysis time. Emits `function_sizes.csv`. |
 
 ## Usage Examples
 

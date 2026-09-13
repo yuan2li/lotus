@@ -8,6 +8,7 @@
 #pragma once
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/SparseBitVector.h"
 
 #include "Analysis/ControlDependence/ControlDependenceGraph.h"
@@ -18,17 +19,20 @@
 
 namespace lotus::cd::detail {
 
+/// Rows are dense bit vectors indexed by vertex ID, so membership tests are
+/// constant-time regardless of function size.
 class Inevitability {
 public:
-  explicit Inevitability(size_t nodeCount = 0) : m_rows(nodeCount) {}
+  explicit Inevitability(size_t nodeCount = 0)
+      : m_rows(nodeCount, llvm::BitVector(nodeCount + 1)) {}
 
   bool contains(const GraphNode *source, const GraphNode *target) const;
-  const llvm::SparseBitVector<> &row(const GraphNode *source) const;
+  const llvm::BitVector &row(const GraphNode *source) const;
   size_t size() const { return m_rows.size(); }
 
 private:
   friend Inevitability computeInevitability(Graph &graph);
-  std::vector<llvm::SparseBitVector<>> m_rows;
+  std::vector<llvm::BitVector> m_rows;
 };
 
 struct DODBiclique {

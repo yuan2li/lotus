@@ -24,12 +24,12 @@ int joinCapped(int left, int right) {
   return left == right ? left : MANY;
 }
 
-bool inSet(const llvm::SparseBitVector<> &set, const GraphNode *node) {
+bool inSet(const llvm::BitVector &set, const GraphNode *node) {
   return set.test(node->getID());
 }
 
 llvm::SparseBitVector<> firstHits(Graph &graph, GraphNode *start,
-                                  const llvm::SparseBitVector<> &set) {
+                                  const llvm::BitVector &set) {
   llvm::SparseBitVector<> hits;
   if (inSet(set, start)) {
     hits.set(start->getID());
@@ -60,7 +60,7 @@ struct OutsideSCCInfo {
 };
 
 OutsideSCCInfo computeOutsideSCCs(Graph &graph,
-                                  const llvm::SparseBitVector<> &set,
+                                  const llvm::BitVector &set,
                                   bool exactSets) {
   const size_t nodeCount = graph.size();
   std::vector<bool> seen(nodeCount + 1, false);
@@ -233,7 +233,7 @@ computeBicliqueFor(Graph &graph, GraphNode *decision,
   }
 
   const int firstCycleID = [&]() {
-    for (unsigned id : set)
+    for (unsigned id : set.set_bits())
       if (id != decision->getID())
         return static_cast<int>(id);
     return EMPTY;
@@ -254,7 +254,7 @@ computeBicliqueFor(Graph &graph, GraphNode *decision,
   }
   if (currentID != firstCycleID || seen.count() + 1 != set.count())
     return std::nullopt;
-  for (unsigned id : set)
+  for (unsigned id : set.set_bits())
     if (id != decision->getID() && !seen.test(id))
       return std::nullopt;
 
