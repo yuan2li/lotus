@@ -10,12 +10,12 @@ namespace lotus::cd::detail {
 bool Inevitability::contains(const GraphNode *source,
                              const GraphNode *target) const {
   if (!source || !target || source->getID() == 0 ||
-      source->getID() > m_rows.size())
+      source->getID() > m_rows.size() || target->getID() > m_rows.size())
     return false;
   return m_rows[source->getID() - 1].test(target->getID());
 }
 
-const llvm::SparseBitVector<> &
+const llvm::BitVector &
 Inevitability::row(const GraphNode *source) const {
   assert(source && source->getID() > 0 && source->getID() <= m_rows.size());
   return m_rows[source->getID() - 1];
