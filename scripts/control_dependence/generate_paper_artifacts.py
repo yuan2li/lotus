@@ -153,6 +153,26 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
     closure_mem_reduction_mean = (
         sum(closure_mem_reductions) / len(closure_mem_reductions) if closure_mem_reductions else 0.0
     )
+    # The reduction means above are reported as magnitudes, so also emit the
+    # direction-aware figures the prose relies on: how much more memory the
+    # biclique variants ever use, and how many closure subjects are slower.
+    enum_mem_max_increase = max([0.0] + [-value for value in enum_mem_reductions])
+    closure_mem_increase_mean = -closure_mem_reduction_mean
+    closure_mem_worse = sum(1 for value in closure_mem_reductions if value < 0)
+    closure_mem_max_increase = max([0.0] + [-value for value in closure_mem_reductions])
+    mem_max_increase = max(enum_mem_max_increase, closure_mem_max_increase)
+    if closure_mem_increase_mean < 0:
+        print("Warning: Full-Closure uses less peak memory on average; "
+              "the evaluation prose says it rose.", file=sys.stderr)
+
+    closure_slower = [
+        r for r in spec_closure
+        if "reference_over_candidate_time" in r and float(r["reference_over_candidate_time"]) < 1.0
+    ]
+    closure_slower_max_ms = max(
+        [0.0] + [max(float(r["reference_median_ns"]), float(r["candidate_median_ns"])) / 1e6
+                 for r in closure_slower]
+    )
 
     # Ablation metrics
     exact_set_overhead = [float(r["candidate_over_reference_time"]) for r in rq2_card if "candidate_over_reference_time" in r]
@@ -185,6 +205,13 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
         f"\\newcommand{{\\ClosureSpeedupMax}}{{{closure_max_speedup:.1f}}}",
         f"\\newcommand{{\\ClosureMaxSubject}}{{\\texttt{{{clean_closure_subject}}}}}",
         f"\\newcommand{{\\ClosureMemReductionPercent}}{{{abs(closure_mem_reduction_mean):.1f}}}",
+        f"\\newcommand{{\\EnumMemMaxIncreasePercent}}{{{enum_mem_max_increase:.1f}}}",
+        f"\\newcommand{{\\ClosureMemIncreasePercent}}{{{closure_mem_increase_mean:.1f}}}",
+        f"\\newcommand{{\\ClosureMemWorseCount}}{{{closure_mem_worse}}}",
+        f"\\newcommand{{\\ClosureMemMaxIncreasePercent}}{{{closure_mem_max_increase:.1f}}}",
+        f"\\newcommand{{\\MemMaxIncreasePercent}}{{{mem_max_increase:.1f}}}",
+        f"\\newcommand{{\\ClosureSlowerCount}}{{{len(closure_slower)}}}",
+        f"\\newcommand{{\\ClosureSlowerMaxMs}}{{{closure_slower_max_ms:.2f}}}",
         f"\\newcommand{{\\ExactSetOverheadGeomean}}{{{exact_set_geomean:.1f}}}",
         f"\\newcommand{{\\EagerPairsOverheadGeomean}}{{{eager_pairs_geomean:.1f}}}",
     ]
@@ -442,7 +469,8 @@ def generate_closure_family_artifacts(rows: List[Dict[str, Any]]) -> tuple[str, 
 
 
 def generate_seed_sweep_artifacts(
-    summary: List[Dict[str, Any]], raw: List[Dict[str, Any]]
+    summary: List[Dict[str, Any]], raw: List[Dict[str, Any]],
+    family_rows: Sequence[Dict[str, Any]] = (), fixed_seed_count: int = 4,
 ) -> tuple[str, str]:
     """Macros and a table for the closure seed-set sensitivity sweep.
 
@@ -472,6 +500,18 @@ def generate_seed_sweep_artifacts(
         f"\\newcommand{{\\ClosureSweepDrawsPerCell}}{{"
         f"{max(int(r['trials']) for r in summary)}}}",
     ]
+    # Compare each instance's fixed seeding (the closure-family table) with the
+    # random draws of the same size, so "favourable end" is checked per instance
+    # rather than by setting a geometric mean against a pooled median.
+    fixed = [r for r in family_rows if r.get("experiment") == "rq1-closure"]
+    if fixed:
+        at_or_above = 0
+        for r in fixed:
+            draws = [float(d["speedup"]) for d in raw
+                     if d["benchmark"] == r["benchmark"] and int(d["seed_count"]) == fixed_seed_count]
+            if draws and float(r["reference_over_candidate_time"]) >= statistics.median(draws):
+                at_or_above += 1
+        macros.append(f"\\newcommand{{\\ClosureFixedAtOrAboveMedianCount}}{{{at_or_above}}}")
 
     lines = [
         "% Auto-generated closure seed-sweep table",
@@ -553,8 +593,15 @@ def main() -> None:
     sweep_summary = args.closure_results_dir / "closure_seed_sweep.csv"
     sweep_raw = args.closure_results_dir / "closure_seed_sweep_raw.csv"
     if sweep_summary.is_file() and sweep_raw.is_file():
+        family_rows = read_summary_csv(closure_summary) if closure_summary.is_file() else []
+        closure_metadata = args.closure_results_dir / "metadata.json"
+        fixed_seed_count = (
+            int(json.loads(closure_metadata.read_text()).get("seed_count", 4))
+            if closure_metadata.is_file() else 4
+        )
         sw_macros, sw_table = generate_seed_sweep_artifacts(
-            read_summary_csv(sweep_summary), read_summary_csv(sweep_raw)
+            read_summary_csv(sweep_summary), read_summary_csv(sweep_raw),
+            family_rows, fixed_seed_count,
         )
         (args.output_dir / "closure_sweep_macros.tex").write_text(sw_macros)
         print(f"Written: {args.output_dir / 'closure_sweep_macros.tex'}")
