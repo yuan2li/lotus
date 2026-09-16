@@ -53,6 +53,21 @@ DependenceResult computeCompactNTSCD(Graph &graph,
 DODBicliqueMap computeCompactDOD(Graph &graph,
                                  const Inevitability &inevitability);
 
+/// Where the biclique construction leaves each binary decision. Diagnostic
+/// only: the analysis itself never reads these counters.
+struct DODExitStats {
+  size_t singleEntry{0};    ///< |B1 u B2| <= 1 (no dependence before branching)
+  size_t sharedEntry{0};    ///< B1 n B2 nonempty (shared branch entry)
+  size_t decisionEntry{0};  ///< the decision itself is a branch entry
+  size_t noCycle{0};        ///< the projection is not a single directed cycle
+  size_t transitions{0};    ///< the label sequence has other than two transitions
+  size_t biclique{0};       ///< a nonempty biclique was returned
+};
+
+DODBicliqueMap computeCompactDODWithExitStats(Graph &graph,
+                                              const Inevitability &inevitability,
+                                              DODExitStats &stats);
+
 /// Ablation variant that propagates complete first-hit sets over the SCC
 /// condensation instead of capped cardinalities.
 DODBicliqueMap computeCompactDODExactSets(Graph &graph,
