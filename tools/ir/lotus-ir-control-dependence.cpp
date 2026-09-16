@@ -69,6 +69,13 @@ cl::opt<unsigned> SeedRng(
     cl::init(0));
 cl::opt<std::string> Format("format", cl::desc("text, json, or csv"),
                             cl::init("text"));
+
+cl::opt<bool> DODExitStatsFlag(
+    "dod-exit-stats",
+    cl::desc("report where the biclique construction leaves each binary "
+             "decision, per function, instead of timing an algorithm"),
+    cl::init(false));
+
 cl::opt<bool> LowerSwitch(
     "lower-switch",
     cl::desc("Lower multiway switches to chains of binary branches before "
@@ -483,6 +490,31 @@ void printJSON(const std::vector<Record> &records) {
 
 } // namespace
 
+void printExitStats(Module &module) {
+  // Runs outside the timed paths: it reports where the biclique construction
+  // leaves each binary decision, which shows why the order relation is empty
+  // on CFGs without irreducible control flow.
+  outs() << "function,decisions,single_entry,shared_entry,decision_entry,"
+            "no_cycle,transitions,biclique\n";
+  for (Function &function : module) {
+    if (function.isDeclaration() || function.empty())
+      continue;
+    if (!FunctionName.empty() && function.getName() != FunctionName)
+      continue;
+    FunctionGraph fg(function);
+    Inevitability inevitable = computeInevitability(fg.graph);
+    DODExitStats stats;
+    computeCompactDODWithExitStats(fg.graph, inevitable, stats);
+    size_t binaryDecisions = 0;
+    for (GraphNode *decision : fg.graph.predicates())
+      binaryDecisions += decision->successors().size() == 2;
+    outs() << '"' << function.getName() << "\"," << binaryDecisions << ','
+           << stats.singleEntry << ',' << stats.sharedEntry << ','
+           << stats.decisionEntry << ',' << stats.noCycle << ','
+           << stats.transitions << ',' << stats.biclique << '\n';
+  }
+}
+
 int main(int argc, char **argv) {
   InitLLVM init(argc, argv);
   cl::ParseCommandLineOptions(argc, argv,
@@ -513,6 +545,10 @@ int main(int argc, char **argv) {
     legacy::PassManager passes;
     passes.add(createLowerSwitchPass());
     passes.run(*module);
+  }
+  if (DODExitStatsFlag) {
+    printExitStats(*module);
+    return 0;
   }
   std::vector<Record> records;
   bool found = FunctionName.empty();
