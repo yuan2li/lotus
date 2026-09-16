@@ -192,12 +192,19 @@ llvm::SparseBitVector<> cyclicInterval(llvm::ArrayRef<GraphNode *> cycle,
 
 std::optional<DODBiclique>
 computeBicliqueFor(Graph &graph, GraphNode *decision,
-                   const Inevitability &inevitability, bool exactSets) {
+                   const Inevitability &inevitability, bool exactSets,
+                   DODExitStats *stats = nullptr) {
+  // Counting is opt-in so the measured configuration stays untouched.
+  auto leave = [stats](size_t DODExitStats::*field) {
+    if (stats)
+      ++(stats->*field);
+    return std::nullopt;
+  };
   if (decision->successors().size() != 2)
     return std::nullopt;
   const auto &set = inevitability.row(decision);
   if (!set.test(decision->getID()))
-    return std::nullopt;
+    return leave(&DODExitStats::noCycle);
 
   GraphNode *firstSuccessor = decision->successors()[0];
   GraphNode *secondSuccessor = decision->successors()[1];
@@ -206,9 +213,12 @@ computeBicliqueFor(Graph &graph, GraphNode *decision,
       firstHits(graph, secondSuccessor, set);
   llvm::SparseBitVector<> allEntries = firstEntries;
   allEntries |= secondEntries;
-  if (allEntries.count() <= 1 || firstEntries.intersects(secondEntries) ||
-      allEntries.test(decision->getID()))
-    return std::nullopt;
+  if (allEntries.count() <= 1)
+    return leave(&DODExitStats::singleEntry);
+  if (firstEntries.intersects(secondEntries))
+    return leave(&DODExitStats::sharedEntry);
+  if (allEntries.test(decision->getID()))
+    return leave(&DODExitStats::decisionEntry);
 
   OutsideSCCInfo outside = computeOutsideSCCs(graph, set, exactSets);
   std::vector<int> successorByID(graph.size() + 1, EMPTY);
@@ -221,14 +231,14 @@ computeBicliqueFor(Graph &graph, GraphNode *decision,
       if (!set.test(successor->getID())) {
         const int component = outside.component[successor->getID()];
         if (component < 0)
-          return std::nullopt;
+          return leave(&DODExitStats::noCycle);
         value = outside.labels[component];
       }
       projectionSuccessor = joinCapped(projectionSuccessor, value);
     }
     if (projectionSuccessor <= 0 ||
         projectionSuccessor == static_cast<int>(decision->getID()))
-      return std::nullopt;
+      return leave(&DODExitStats::noCycle);
     successorByID[node->getID()] = projectionSuccessor;
   }
 
@@ -239,7 +249,7 @@ computeBicliqueFor(Graph &graph, GraphNode *decision,
     return EMPTY;
   }();
   if (firstCycleID <= 0)
-    return std::nullopt;
+    return leave(&DODExitStats::noCycle);
 
   std::vector<GraphNode *> cycle;
   llvm::SparseBitVector<> seen;
@@ -247,16 +257,16 @@ computeBicliqueFor(Graph &graph, GraphNode *decision,
   while (currentID > 0 && !seen.test(currentID)) {
     if (currentID >= static_cast<int>(successorByID.size()) ||
         successorByID[currentID] <= 0)
-      return std::nullopt;
+      return leave(&DODExitStats::noCycle);
     seen.set(currentID);
     cycle.push_back(graph.getNode(currentID));
     currentID = successorByID[currentID];
   }
   if (currentID != firstCycleID || seen.count() + 1 != set.count())
-    return std::nullopt;
+    return leave(&DODExitStats::noCycle);
   for (unsigned id : set)
     if (id != decision->getID() && !seen.test(id))
-      return std::nullopt;
+      return leave(&DODExitStats::noCycle);
 
   struct MarkedEntry {
     size_t index;
@@ -271,7 +281,7 @@ computeBicliqueFor(Graph &graph, GraphNode *decision,
       marked.push_back({index, 2});
   }
   if (marked.empty())
-    return std::nullopt;
+    return leave(&DODExitStats::noCycle);
 
   struct Transition {
     MarkedEntry from;
@@ -285,7 +295,7 @@ computeBicliqueFor(Graph &graph, GraphNode *decision,
       transitions.push_back({current, next});
   }
   if (transitions.size() != 2)
-    return std::nullopt;
+    return leave(&DODExitStats::transitions);
 
   std::optional<size_t> alpha;
   std::optional<size_t> beta;
@@ -301,12 +311,12 @@ computeBicliqueFor(Graph &graph, GraphNode *decision,
     }
   }
   if (!alpha || !beta || !gamma || !delta)
-    return std::nullopt;
+    return leave(&DODExitStats::transitions);
 
   llvm::SparseBitVector<> left = cyclicInterval(cycle, *alpha, *beta);
   llvm::SparseBitVector<> right = cyclicInterval(cycle, *gamma, *delta);
   if (left.empty() || right.empty() || left.intersects(right))
-    return std::nullopt;
+    return leave(&DODExitStats::noCycle);
 
   return DODBiclique{
       decision,         std::move(left),         std::move(right),
@@ -329,16 +339,20 @@ size_t DODBiclique::pairCount() const {
 
 DODBicliqueMap computeCompactDODImpl(Graph &graph,
                                      const Inevitability &inevitability,
-                                     bool exactSets) {
+                                     bool exactSets,
+                                     DODExitStats *stats = nullptr) {
   assert(inevitability.size() == graph.size());
   DODBicliqueMap result;
   for (GraphNode *decision : graph.predicates()) {
     if (decision->successors().size() != 2)
       continue;
     std::optional<DODBiclique> biclique =
-        computeBicliqueFor(graph, decision, inevitability, exactSets);
-    if (biclique)
+        computeBicliqueFor(graph, decision, inevitability, exactSets, stats);
+    if (biclique) {
+      if (stats)
+        ++stats->biclique;
       result.emplace(decision, std::move(*biclique));
+    }
   }
   return result;
 }
@@ -351,6 +365,12 @@ DODBicliqueMap computeCompactDOD(Graph &graph,
 DODBicliqueMap computeCompactDODExactSets(Graph &graph,
                                           const Inevitability &inevitability) {
   return computeCompactDODImpl(graph, inevitability, true);
+}
+
+DODBicliqueMap computeCompactDODWithExitStats(Graph &graph,
+                                              const Inevitability &inevitability,
+                                              DODExitStats &stats) {
+  return computeCompactDODImpl(graph, inevitability, false, &stats);
 }
 
 DependenceResult
