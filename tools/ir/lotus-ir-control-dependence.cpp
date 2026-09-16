@@ -69,6 +69,12 @@ cl::opt<unsigned> SeedRng(
              "per function, so paired variants receive identical seeds "
              "(default 0 = even spread)"),
     cl::init(0));
+cl::opt<bool> DODExitStatsFlag(
+    "dod-exit-stats",
+    cl::desc("report where Algorithm 2 leaves each binary decision, per "
+             "function, instead of timing an algorithm"),
+    cl::init(false));
+
 cl::opt<bool> LowerSwitch(
     "lower-switch",
     cl::desc("Lower multiway switches to chains of binary branches before "
@@ -491,6 +497,30 @@ void printJSON(const std::vector<Record> &records) {
 
 } // namespace
 
+void printExitStats(Module &module) {
+  // Runs outside the timed paths: it reports where Algorithm 2 leaves each
+  // binary decision, which explains the empty order relation on real CFGs.
+  outs() << "function,decisions,single_entry,shared_entry,decision_entry,"
+            "no_cycle,transitions,biclique\n";
+  for (Function &function : module) {
+    if (function.isDeclaration() || function.empty())
+      continue;
+    if (!FunctionName.empty() && function.getName() != FunctionName)
+      continue;
+    FunctionGraph fg(function);
+    Inevitability inevitable = computeInevitability(fg.graph);
+    DODExitStats stats;
+    computeCompactDODWithExitStats(fg.graph, inevitable, stats);
+    size_t binaryDecisions = 0;
+    for (GraphNode *decision : fg.graph.predicates())
+      binaryDecisions += decision->successors().size() == 2;
+    outs() << '"' << function.getName() << "\"," << binaryDecisions << ','
+           << stats.singleEntry << ',' << stats.sharedEntry << ','
+           << stats.decisionEntry << ',' << stats.noCycle << ','
+           << stats.transitions << ',' << stats.biclique << '\n';
+  }
+}
+
 int main(int argc, char **argv) {
   InitLLVM init(argc, argv);
   cl::ParseCommandLineOptions(argc, argv,
@@ -517,6 +547,10 @@ int main(int argc, char **argv) {
     legacy::PassManager passes;
     passes.add(createLowerSwitchPass());
     passes.run(*module);
+  }
+  if (DODExitStatsFlag) {
+    printExitStats(*module);
+    return 0;
   }
   std::vector<Record> records;
   bool found = FunctionName.empty();
