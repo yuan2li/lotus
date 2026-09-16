@@ -468,6 +468,80 @@ def generate_closure_family_artifacts(rows: List[Dict[str, Any]]) -> tuple[str, 
     return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
 
 
+def generate_exit_distribution_macros(rows: List[Dict[str, Any]]) -> str:
+    """Macros describing where Algorithm 2 leaves each real binary decision.
+
+    Produced by dod_exit_distribution.py.  Every decision leaving at the first
+    test is the structural reason the order relation is empty on real CFGs.
+    """
+    reasons = ["single_entry", "shared_entry", "decision_entry", "no_cycle",
+               "transitions", "biclique"]
+    decisions = sum(int(r["decisions"]) for r in rows)
+    counted = {reason: sum(int(r[reason]) for r in rows) for reason in reasons}
+    single_share = 100.0 * counted["single_entry"] / decisions if decisions else 0.0
+    macros = [
+        "% Auto-generated Algorithm 2 exit-distribution macros by generate_paper_artifacts.py",
+        f"\\newcommand{{\\BinaryDecisionCount}}{{{decisions:,}}}",
+        f"\\newcommand{{\\SingleEntryExitPercent}}{{{single_share:.1f}}}",
+        f"\\newcommand{{\\SingleEntryExitCount}}{{{counted['single_entry']:,}}}",
+        f"\\newcommand{{\\LaterExitCount}}{{{decisions - counted['single_entry']:,}}}",
+    ]
+    return "\n".join(macros) + "\n"
+
+
+def generate_output_sensitivity_artifacts(raw_rows: List[Dict[str, Any]]) -> tuple[str, str]:
+    """Macros and a table separating enumeration cost from construction cost.
+
+    Theorem 4.23 splits the enumeration bound into O(n(n+m)) construction plus
+    O(K) output.  On the closure family K grows cubically while the biclique
+    incidence count C grows quadratically, so the per-triple and per-incidence
+    costs show the two terms separately.
+    """
+    import re
+    import statistics
+
+    by_k: Dict[int, List[Dict[str, Any]]] = {}
+    for row in raw_rows:
+        if row.get("algorithm") != "dod-compact" or row.get("experiment") != "rq1-enumeration":
+            continue
+        match = re.search(r"k(\d+)", str(row["benchmark"]))
+        if match:
+            by_k.setdefault(int(match.group(1)), []).append(row)
+
+    lines = [
+        "% Auto-generated output-sensitivity table",
+        "\\begin{tabular}{@{}rrrrr@{}}",
+        "\\toprule",
+        "$k$ & $K$ & $C$ & Enumeration (ns/triple) & Construction (ns/incidence) \\\\",
+        "\\midrule",
+    ]
+    per_pair: List[float] = []
+    per_incidence: List[float] = []
+    for k in sorted(by_k):
+        rows = by_k[k]
+        pairs = int(rows[0]["dod_pairs"])
+        incidences = int(rows[0]["incidences"])
+        visit = statistics.median(int(r["pair_visit_ns"]) for r in rows)
+        build = statistics.median(int(r["dod_ns"]) for r in rows)
+        per_pair.append(visit / pairs)
+        per_incidence.append(build / incidences)
+        lines.append(
+            f"{k} & {pairs:,} & {incidences:,} & {visit / pairs:.1f} & {build / incidences:.0f} \\\\"
+        )
+    lines += ["\\bottomrule", "\\end{tabular}"]
+
+    macros = [
+        "% Auto-generated output-sensitivity macros by generate_paper_artifacts.py",
+        f"\\newcommand{{\\EnumNsPerTripleMin}}{{{min(per_pair):.1f}}}",
+        f"\\newcommand{{\\EnumNsPerTripleMax}}{{{max(per_pair):.1f}}}",
+        f"\\newcommand{{\\BuildNsPerIncidenceMin}}{{{min(per_incidence):.0f}}}",
+        f"\\newcommand{{\\BuildNsPerIncidenceMax}}{{{max(per_incidence):.0f}}}",
+        f"\\newcommand{{\\OutputSensitivityTripleGrowth}}{{"
+        f"{int(round(max(int(r['dod_pairs']) for rows in by_k.values() for r in rows) / min(int(r['dod_pairs']) for rows in by_k.values() for r in rows)))}}}",
+    ]
+    return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
+
+
 def generate_seed_sweep_artifacts(
     summary: List[Dict[str, Any]], raw: List[Dict[str, Any]],
     family_rows: Sequence[Dict[str, Any]] = (), fixed_seed_count: int = 4,
@@ -609,6 +683,25 @@ def main() -> None:
         print(f"Written: {args.output_dir / 'tab_closure_sweep.tex'}")
     else:
         print(f"Note: {sweep_summary} not found; skipping seed-sweep artifacts")
+
+    closure_raw = args.closure_results_dir / "raw.csv"
+    if closure_raw.is_file():
+        os_macros, os_table = generate_output_sensitivity_artifacts(read_summary_csv(closure_raw))
+        (args.output_dir / "output_sensitivity_macros.tex").write_text(os_macros)
+        print(f"Written: {args.output_dir / 'output_sensitivity_macros.tex'}")
+        (args.output_dir / "tab_output_sensitivity.tex").write_text(os_table)
+        print(f"Written: {args.output_dir / 'tab_output_sensitivity.tex'}")
+    else:
+        print(f"Note: {closure_raw} not found; skipping output-sensitivity artifacts")
+
+    exit_stats = args.results_dir / "dod_exit_stats.csv"
+    if exit_stats.is_file():
+        (args.output_dir / "exit_distribution_macros.tex").write_text(
+            generate_exit_distribution_macros(read_summary_csv(exit_stats))
+        )
+        print(f"Written: {args.output_dir / 'exit_distribution_macros.tex'}")
+    else:
+        print(f"Note: {exit_stats} not found; skipping exit-distribution macros")
 
 
 if __name__ == "__main__":
