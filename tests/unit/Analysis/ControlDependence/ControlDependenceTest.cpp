@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <set>
 #include <tuple>
@@ -785,6 +786,11 @@ TEST(ControlDependenceTest, StrongAndCompactClosureAgreeOnReachableGraphs) {
 
   EXPECT_GT(reachableGraphs, 0u);
   EXPECT_GT(comparisons, 0u);
+  // Printed so callers can see how large this differential sweep actually is.
+  std::cout << "[ SWEEP    ] " << graphCount << " graphs, " << reachableGraphs
+            << " with all vertices reachable, " << graphsWithOrderRelation
+            << " with a non-empty order relation, " << comparisons
+            << " closure comparisons\n";
   // Without this the sweep could pass vacuously: the order relation is empty on
   // every reducible graph, so a suite that never reaches a non-empty one would
   // agree trivially and prove nothing about the biclique path.
