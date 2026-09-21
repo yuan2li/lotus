@@ -82,6 +82,12 @@ Relevant options:
   instructions to cascades of binary branches before graph extraction, so their
   decisions participate in the binary-decision DOD analysis instead of being
   skipped. Disabling it reproduces the untransformed CFG.
+- ``--reducibility-guard`` (DOD algorithms only) first checks whether DOD is
+  known to be empty: the part reachable from the entry is reducible and no
+  unreachable binary decision reaches a cycle. When the check holds, the
+  algorithm is skipped and the function reports an empty DOD. The check is
+  included in ``analysis_ns`` and also reported as ``guard_ns``;
+  ``guard_skipped`` records whether it held.
 - ``--format=text|json|csv`` selects the output format.
 
 .. toctree::
