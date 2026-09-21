@@ -48,13 +48,14 @@ them are relevant to the paper's closure claim:
   reachable-start hypothesis the two legitimately diverge, because a forward
   walk from the seed cannot see an unreachable decision.
 
-Build them in a **separate** directory so the evaluation build's configuration
-is left untouched:
+These tests are part of Lotus's shared `analysis_tests` suite, so filter to
+`ControlDependenceTest.*` when running them. Build them in a **separate**
+directory so the evaluation build's configuration is left untouched:
 
 ```bash
 cmake -S . -B build-tests -DCMAKE_BUILD_TYPE=Release -DLOTUS_BUILD_TESTS=ON
-cmake --build build-tests --target control_dependence_tests
-./build-tests/bin/tests/control_dependence_tests
+cmake --build build-tests --target analysis_tests
+./build-tests/bin/tests/analysis_tests --gtest_filter='ControlDependenceTest.*'
 ```
 
 To reuse the already-compiled objects in `build-release` instead, toggle the
@@ -63,10 +64,10 @@ configuration:
 
 ```bash
 cmake -DLOTUS_BUILD_TESTS=ON build-release
-cmake --build build-release --target control_dependence_tests
-./build-release/bin/tests/control_dependence_tests
+cmake --build build-release --target analysis_tests
+./build-release/bin/tests/analysis_tests --gtest_filter='ControlDependenceTest.*'
 cmake -DLOTUS_BUILD_TESTS=OFF build-release   # restore
 ```
 
-The exhaustive closure test takes roughly 5 s; the rest of the suite is
-under 100 ms.
+The exhaustive closure test takes roughly 5 s; the other
+`ControlDependenceTest` cases take under 100 ms in total.
