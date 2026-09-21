@@ -19,11 +19,12 @@
 #include "Analysis/ControlDependence/ControlClosure.h"
 #include "Analysis/ControlDependence/DOD.h"
 #include "Analysis/ControlDependence/NTSCD.h"
+#include "Analysis/ControlDependence/Reducibility.h"
 
 #include <algorithm>
 #include <chrono>
-#include <numeric>
 #include <cstdint>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -75,6 +76,13 @@ cl::opt<bool> DODExitStatsFlag(
              "function, instead of timing an algorithm"),
     cl::init(false));
 
+cl::opt<bool> ReducibilityGuard(
+    "reducibility-guard",
+    cl::desc(
+        "For DOD algorithms, first check isDODEmptyByReducibility and skip "
+        "the algorithm when it holds; the check is timed in analysis_ns "
+        "and reported as guard_ns"),
+    cl::init(false));
 cl::opt<bool> LowerSwitch(
     "lower-switch",
     cl::desc("Lower multiway switches to chains of binary branches before "
@@ -253,6 +261,8 @@ struct Record {
   uint64_t totalNS{}, inevitableNS{}, ntscdNS{}, dodNS{}, visitNS{},
       closureNS{};
   uint64_t peakRSSKB{}, resultFingerprint{};
+  uint64_t guardNS{};
+  bool guardSkipped{};
 };
 
 uint64_t mixFingerprint(uint64_t value) {
@@ -292,6 +302,19 @@ Record run(Function &function, FunctionGraph &fg, Algorithm algorithm) {
   DODBicliqueMap bicliques;
   NodeSet closure;
   auto totalStart = Clock::now();
+
+  if (ReducibilityGuard) {
+    auto start = Clock::now();
+    r.guardSkipped = isDODEmptyByReducibility(fg.graph, *fg.graph.getNode(1));
+    r.guardNS = elapsed(start);
+    // A skipped function reports an empty DOD: every count and the
+    // fingerprint stay zero, as they would after running the algorithm.
+    if (r.guardSkipped) {
+      r.totalNS = elapsed(totalStart);
+      r.peakRSSKB = peakRSSKB();
+      return r;
+    }
+  }
 
   switch (algorithm) {
   case Algorithm::NTSCD2:
@@ -450,14 +473,16 @@ void printText(const std::vector<Record> &records) {
            << " ntscd_ns=" << r.ntscdNS << " dod_ns=" << r.dodNS
            << " pair_visit_ns=" << r.visitNS << " closure_ns=" << r.closureNS
            << " peak_rss_kb=" << r.peakRSSKB
-           << " result_fingerprint=" << r.resultFingerprint << "\n";
+           << " result_fingerprint=" << r.resultFingerprint
+           << " guard_ns=" << r.guardNS << " guard_skipped=" << r.guardSkipped
+           << "\n";
 }
 
 void printCSV(const std::vector<Record> &records) {
   outs() << "function,algorithm,nodes,edges,decisions,dependencies,bicliques,"
             "incidences,dod_pairs,closure_size,analysis_ns,inevitability_ns,"
             "ntscd_ns,dod_ns,pair_visit_ns,closure_ns,peak_rss_kb,"
-            "result_fingerprint\n";
+            "result_fingerprint,guard_ns,guard_skipped\n";
   for (const Record &r : records)
     outs() << '"' << r.function << "\"," << r.algorithm << ',' << r.nodes << ','
            << r.edges << ',' << r.decisions << ',' << r.dependencies << ','
@@ -465,7 +490,7 @@ void printCSV(const std::vector<Record> &records) {
            << r.closureSize << ',' << r.totalNS << ',' << r.inevitableNS << ','
            << r.ntscdNS << ',' << r.dodNS << ',' << r.visitNS << ','
            << r.closureNS << ',' << r.peakRSSKB << ',' << r.resultFingerprint
-           << '\n';
+           << ',' << r.guardNS << ',' << r.guardSkipped << '\n';
 }
 
 void printJSON(const std::vector<Record> &records) {
@@ -490,6 +515,8 @@ void printJSON(const std::vector<Record> &records) {
     o["closure_ns"] = int64_t(r.closureNS);
     o["peak_rss_kb"] = int64_t(r.peakRSSKB);
     o["result_fingerprint"] = int64_t(r.resultFingerprint);
+    o["guard_ns"] = int64_t(r.guardNS);
+    o["guard_skipped"] = r.guardSkipped;
     array.push_back(std::move(o));
   }
   outs() << formatv("{0:2}\n", json::Value(std::move(array)));
@@ -530,6 +557,8 @@ int main(int argc, char **argv) {
   Algorithm algorithm = parseAlgorithm(AlgorithmName);
   if (VisitPairs && !isDOD(algorithm))
     report_fatal_error("--visit-pairs is valid only for DOD algorithms");
+  if (ReducibilityGuard && !isDOD(algorithm))
+    report_fatal_error("--reducibility-guard is valid only for DOD algorithms");
   if ((!SeedIndices.empty() || SeedCount > 0 || SeedRng > 0) && !isClosure(algorithm))
     report_fatal_error("--seed-index is valid only for closure algorithms");
 
