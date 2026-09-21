@@ -6,6 +6,7 @@ add_library(CanaryControlDependence STATIC
   ControlDependence.cpp
   DOD.cpp
   NTSCD.cpp
+  Reducibility.cpp
   SCD.cpp)
 
 target_link_libraries(CanaryControlDependence PUBLIC
