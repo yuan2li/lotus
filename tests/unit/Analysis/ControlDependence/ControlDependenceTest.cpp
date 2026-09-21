@@ -11,6 +11,7 @@
 #include "Analysis/ControlDependence/ControlClosure.h"
 #include "Analysis/ControlDependence/DOD.h"
 #include "Analysis/ControlDependence/ICFGControlDependence.h"
+#include "Analysis/ControlDependence/Reducibility.h"
 #include "IR/ICFG/ICFG.h"
 #include "IR/ICFG/ICFGBuilder.h"
 
@@ -19,6 +20,7 @@
 #include <functional>
 #include <iostream>
 #include <memory>
+#include <random>
 #include <set>
 #include <tuple>
 #include <vector>
@@ -1029,6 +1031,70 @@ TEST(ControlDependenceTest,
   lotus::cd::detail::forEachBaselineDODPair(
       graph, [&](auto *, auto *, auto *) { ++baselinePairs; });
   EXPECT_EQ(baselinePairs, 1u);
+}
+
+// The library guard must agree with the reference predicate above, which the
+// preceding tests tie to an empty DOD. Compare them on every four-vertex graph
+// and on random larger graphs, where the dominator computation has more room to
+// go wrong, and check the implication on those larger graphs as well.
+TEST(ControlDependenceTest, LibraryReducibilityGuardMatchesReference) {
+  auto reference = [](lotus::cd::detail::Graph &graph,
+                      lotus::cd::detail::GraphNode *start) {
+    return reachablePartIsReducible(graph, start) &&
+           !unreachableDecisionReachesCycle(graph, start);
+  };
+
+  constexpr unsigned nodeCount = 4;
+  constexpr unsigned graphCount = 1u << (nodeCount * nodeCount);
+  for (unsigned mask = 0; mask < graphCount; ++mask) {
+    lotus::cd::detail::Graph graph;
+    std::vector<lotus::cd::detail::GraphNode *> nodes;
+    for (unsigned index = 0; index < nodeCount; ++index)
+      nodes.push_back(&graph.createNode());
+    for (unsigned source = 0; source < nodeCount; ++source)
+      for (unsigned target = 0; target < nodeCount; ++target)
+        if (mask & (1u << (source * nodeCount + target)))
+          graph.addEdge(*nodes[source], *nodes[target]);
+    ASSERT_EQ(lotus::cd::detail::isDODEmptyByReducibility(graph, *nodes[0]),
+              reference(graph, nodes[0]))
+        << "graph mask " << mask;
+  }
+
+  constexpr unsigned trials = 20000;
+  const double densities[] = {0.15, 0.25, 0.35};
+  std::mt19937 rng(20260921);
+  unsigned guarded = 0;
+  unsigned unguardedWithDOD = 0;
+  for (unsigned trial = 0; trial < trials; ++trial) {
+    unsigned size = 5 + trial % 5;
+    std::bernoulli_distribution edge(densities[trial % 3]);
+    lotus::cd::detail::Graph graph;
+    std::vector<lotus::cd::detail::GraphNode *> nodes;
+    for (unsigned index = 0; index < size; ++index)
+      nodes.push_back(&graph.createNode());
+    for (unsigned source = 0; source < size; ++source)
+      for (unsigned target = 0; target < size; ++target)
+        if (edge(rng))
+          graph.addEdge(*nodes[source], *nodes[target]);
+
+    bool guard = lotus::cd::detail::isDODEmptyByReducibility(graph, *nodes[0]);
+    ASSERT_EQ(guard, reference(graph, nodes[0])) << "random trial " << trial;
+    auto inevitability = lotus::cd::detail::computeInevitability(graph);
+    bool empty = bruteDOD(graph, inevitability).empty();
+    if (guard) {
+      ++guarded;
+      ASSERT_TRUE(empty) << "random trial " << trial;
+    } else {
+      unguardedWithDOD += !empty;
+    }
+  }
+
+  std::cout << "[ SWEEP    ] " << graphCount << " four-vertex graphs and "
+            << trials << " random graphs of 5-9 vertices, " << guarded
+            << " random graphs guarded, " << unguardedWithDOD
+            << " unguarded random graphs with a non-empty DOD\n";
+  EXPECT_GT(guarded, 0u);
+  EXPECT_GT(unguardedWithDOD, 0u);
 }
 
 } // namespace
