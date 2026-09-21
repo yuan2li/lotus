@@ -838,4 +838,197 @@ TEST(ControlDependenceTest, StrongClosureMissesUnreachableDecisions) {
   EXPECT_LT(closureIDs(sota).size(), closureIDs(full).size());
 }
 
+// Reference checks for the reducibility-guard tests below. Vertices are
+// numbered 1..n and `start` is the root, as in the driver.
+std::vector<bool> reachableFrom(lotus::cd::detail::Graph &graph,
+                                lotus::cd::detail::GraphNode *start) {
+  std::vector<bool> seen(graph.size() + 1, false);
+  std::vector<lotus::cd::detail::GraphNode *> stack{start};
+  seen[start->getID()] = true;
+  while (!stack.empty()) {
+    auto *node = stack.back();
+    stack.pop_back();
+    for (auto *successor : node->successors())
+      if (!seen[successor->getID()]) {
+        seen[successor->getID()] = true;
+        stack.push_back(successor);
+      }
+  }
+  return seen;
+}
+
+// Whether the subgraph reachable from `start` is reducible: removing every edge
+// u -> v whose target dominates its source leaves it acyclic (Hecht-Ullman).
+bool reachablePartIsReducible(lotus::cd::detail::Graph &graph,
+                              lotus::cd::detail::GraphNode *start) {
+  unsigned n = graph.size();
+  unsigned root = start->getID();
+  std::vector<bool> reach = reachableFrom(graph, start);
+  std::vector<std::vector<unsigned>> preds(n + 1);
+  for (auto *node : graph.nodes())
+    if (reach[node->getID()])
+      for (auto *successor : node->successors())
+        preds[successor->getID()].push_back(node->getID());
+
+  // dominators[v][u] holds when u dominates v; iterate to the greatest fixed
+  // point, starting from "every reachable vertex dominates v".
+  std::vector<std::vector<bool>> dominators(n + 1, reach);
+  dominators[root].assign(n + 1, false);
+  dominators[root][root] = true;
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (unsigned v = 1; v <= n; ++v) {
+      if (!reach[v] || v == root)
+        continue;
+      std::vector<bool> next(n + 1, true);
+      for (unsigned pred : preds[v])
+        for (unsigned u = 1; u <= n; ++u)
+          next[u] = next[u] && dominators[pred][u];
+      next[0] = false;
+      next[v] = true;
+      if (next != dominators[v]) {
+        dominators[v] = next;
+        changed = true;
+      }
+    }
+  }
+
+  std::vector<unsigned char> color(n + 1, 0);
+  std::function<bool(unsigned)> hasForwardCycle = [&](unsigned u) {
+    color[u] = 1;
+    for (auto *successor : graph.getNode(u)->successors()) {
+      unsigned v = successor->getID();
+      if (dominators[u][v])
+        continue; // A back edge.
+      if (color[v] == 1 || (color[v] == 0 && hasForwardCycle(v)))
+        return true;
+    }
+    color[u] = 2;
+    return false;
+  };
+  for (unsigned v = 1; v <= n; ++v)
+    if (reach[v] && color[v] == 0 && hasForwardCycle(v))
+      return false;
+  return true;
+}
+
+// Whether a binary decision that `start` cannot reach can itself reach a cycle.
+// DOD at a decision needs two vertices met in opposite orders on its branches,
+// which is impossible when everything the decision reaches is acyclic.
+bool unreachableDecisionReachesCycle(lotus::cd::detail::Graph &graph,
+                                     lotus::cd::detail::GraphNode *start) {
+  std::vector<bool> reach = reachableFrom(graph, start);
+  auto onCycle = [&](lotus::cd::detail::GraphNode *node) {
+    for (auto *successor : node->successors())
+      if (reachableFrom(graph, successor)[node->getID()])
+        return true;
+    return false;
+  };
+  for (auto *decision : graph.nodes()) {
+    if (reach[decision->getID()] || decision->successors().size() != 2)
+      continue;
+    std::vector<bool> below = reachableFrom(graph, decision);
+    for (auto *node : graph.nodes())
+      if (below[node->getID()] && onCycle(node))
+        return true;
+  }
+  return false;
+}
+
+size_t dependenceCount(const lotus::cd::detail::DependenceResult &result) {
+  size_t count = 0;
+  for (const auto &entry : result.first)
+    count += entry.second.size();
+  return count;
+}
+
+// A reducibility guard lets a client skip DOD when it is known to be empty. In
+// this graph model (several sinks, no unique exit, and vertices the start
+// cannot reach) the guard must also account for unreachable decisions: it holds
+// when the part reachable from the start is reducible and no unreachable
+// decision reaches a cycle. Check exhaustively that the guard implies an empty
+// DOD under the definition, the compact algorithm, and both baseline entry
+// points.
+TEST(ControlDependenceTest, ReducibilityGuardImpliesEmptyDOD) {
+  constexpr unsigned nodeCount = 4;
+  constexpr unsigned graphCount = 1u << (nodeCount * nodeCount);
+  unsigned guarded = 0;
+  unsigned unguardedWithDOD = 0;
+  unsigned reducibleReachablePartWithDOD = 0;
+
+  for (unsigned mask = 0; mask < graphCount; ++mask) {
+    lotus::cd::detail::Graph graph;
+    std::vector<lotus::cd::detail::GraphNode *> nodes;
+    for (unsigned index = 0; index < nodeCount; ++index)
+      nodes.push_back(&graph.createNode());
+    for (unsigned source = 0; source < nodeCount; ++source)
+      for (unsigned target = 0; target < nodeCount; ++target)
+        if (mask & (1u << (source * nodeCount + target)))
+          graph.addEdge(*nodes[source], *nodes[target]);
+
+    bool reducible = reachablePartIsReducible(graph, nodes[0]);
+    bool guard = reducible && !unreachableDecisionReachesCycle(graph, nodes[0]);
+    auto inevitability = lotus::cd::detail::computeInevitability(graph);
+    std::set<Triple> definition = bruteDOD(graph, inevitability);
+    if (!guard) {
+      unguardedWithDOD += !definition.empty();
+      reducibleReachablePartWithDOD += reducible && !definition.empty();
+      continue;
+    }
+
+    ++guarded;
+    ASSERT_TRUE(definition.empty()) << "graph mask " << mask;
+    ASSERT_TRUE(
+        lotus::cd::detail::computeCompactDOD(graph, inevitability).empty())
+        << "graph mask " << mask;
+    size_t baselinePairs = 0;
+    lotus::cd::detail::forEachBaselineDODPair(
+        graph, [&](auto *, auto *, auto *) { ++baselinePairs; });
+    ASSERT_EQ(baselinePairs, 0u) << "graph mask " << mask;
+    ASSERT_EQ(dependenceCount(lotus::cd::detail::computeDOD(graph)), 0u)
+        << "graph mask " << mask;
+  }
+
+  std::cout << "[ SWEEP    ] " << graphCount << " graphs, " << guarded
+            << " satisfy the reducibility guard, " << unguardedWithDOD
+            << " others have a non-empty DOD, " << reducibleReachablePartWithDOD
+            << " of those with a reducible reachable part\n";
+  EXPECT_GT(guarded, 0u);
+  // Without this the property could hold vacuously.
+  EXPECT_GT(unguardedWithDOD, 0u)
+      << "no graph in the sweep had a non-empty DOD";
+  // The unreachable-decision clause is necessary: checking only the reachable
+  // part would skip these graphs even though their DOD is non-empty.
+  EXPECT_GT(reducibleReachablePartWithDOD, 0u);
+}
+
+// The smallest witness for that clause. The reachable part 1 -> 2 <-> 3 is
+// reducible, but vertex 4, which the start cannot reach, enters the loop at
+// both 2 and 3 and so orders them decisively. A guard that inspects only the
+// reachable part, such as LLVM's containsIrreducibleCFG, would skip this DOD.
+TEST(ControlDependenceTest,
+     ReachableOnlyReducibilityGuardMissesUnreachableDecisions) {
+  lotus::cd::detail::Graph graph;
+  std::vector<lotus::cd::detail::GraphNode *> nodes;
+  for (unsigned index = 0; index < 4; ++index)
+    nodes.push_back(&graph.createNode());
+  graph.addEdge(*nodes[0], *nodes[1]);
+  graph.addEdge(*nodes[1], *nodes[2]);
+  graph.addEdge(*nodes[2], *nodes[1]);
+  graph.addEdge(*nodes[3], *nodes[1]);
+  graph.addEdge(*nodes[3], *nodes[2]);
+
+  ASSERT_TRUE(reachablePartIsReducible(graph, nodes[0]));
+  ASSERT_TRUE(unreachableDecisionReachesCycle(graph, nodes[0]));
+
+  auto inevitability = lotus::cd::detail::computeInevitability(graph);
+  EXPECT_EQ(bruteDOD(graph, inevitability), (std::set<Triple>{{4, 2, 3}}));
+  EXPECT_FALSE(
+      lotus::cd::detail::computeCompactDOD(graph, inevitability).empty());
+  size_t baselinePairs = 0;
+  lotus::cd::detail::forEachBaselineDODPair(
+      graph, [&](auto *, auto *, auto *) { ++baselinePairs; });
+  EXPECT_EQ(baselinePairs, 1u);
+}
+
 } // namespace
