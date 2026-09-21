@@ -181,6 +181,13 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
     eager_pairs_overhead = [float(r["candidate_over_reference_time"]) for r in rq2_cons if "candidate_over_reference_time" in r]
     eager_pairs_geomean = geometric_mean(eager_pairs_overhead) if eager_pairs_overhead else 1.0
 
+    # Spreads make the null result on real subjects checkable: both ablations
+    # stay within run-to-run noise there because the order relation is empty.
+    exact_set_min = min(exact_set_overhead) if exact_set_overhead else 1.0
+    exact_set_max = max(exact_set_overhead) if exact_set_overhead else 1.0
+    eager_pairs_min = min(eager_pairs_overhead) if eager_pairs_overhead else 1.0
+    eager_pairs_max = max(eager_pairs_overhead) if eager_pairs_overhead else 1.0
+
     clean_comp_subject = compression_max_subject.replace("_", "\\_")
     clean_enum_subject = enum_max_subject.replace("_", "\\_")
     clean_closure_subject = closure_max_subject.replace("_", "\\_")
@@ -214,6 +221,10 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
         f"\\newcommand{{\\ClosureSlowerMaxMs}}{{{closure_slower_max_ms:.2f}}}",
         f"\\newcommand{{\\ExactSetOverheadGeomean}}{{{exact_set_geomean:.1f}}}",
         f"\\newcommand{{\\EagerPairsOverheadGeomean}}{{{eager_pairs_geomean:.1f}}}",
+        f"\\newcommand{{\\ExactSetOverheadMin}}{{{exact_set_min:.2f}}}",
+        f"\\newcommand{{\\ExactSetOverheadMax}}{{{exact_set_max:.2f}}}",
+        f"\\newcommand{{\\EagerPairsOverheadMin}}{{{eager_pairs_min:.2f}}}",
+        f"\\newcommand{{\\EagerPairsOverheadMax}}{{{eager_pairs_max:.2f}}}",
     ]
     return "\n".join(macros) + "\n"
 
@@ -408,7 +419,7 @@ LOTUS_ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE_ROOT = LOTUS_ROOT.parent
 
 
-def generate_closure_family_artifacts(rows: List[Dict[str, Any]]) -> tuple[str, str]:
+def generate_closure_family_artifacts(rows: List[Dict[str, Any]]) -> tuple[str, str, str]:
     """Macros and a table for the well-formed non-trivial-closure family.
 
     The real-world subjects all have an empty DOD relation, so they cannot
@@ -432,6 +443,8 @@ def generate_closure_family_artifacts(rows: List[Dict[str, Any]]) -> tuple[str, 
     max_speedup = max(speedups)
     max_k = k_of(max(closure, key=lambda r: float(r["reference_over_candidate_time"])))
     eager_overheads = [float(r["candidate_over_reference_time"]) for r in eager.values()]
+    exact = {k_of(r): r for r in rows if r.get("experiment") == "rq2-cardinality"}
+    exact_overheads = [float(r["candidate_over_reference_time"]) for r in exact.values()]
 
     macros = [
         "% Auto-generated closure-family macros by generate_paper_artifacts.py",
@@ -443,6 +456,9 @@ def generate_closure_family_artifacts(rows: List[Dict[str, Any]]) -> tuple[str, 
         f"\\newcommand{{\\ClosureFamilySpeedupMaxK}}{{{max_k}}}",
         f"\\newcommand{{\\ClosureFamilySpeedupMin}}{{{min(speedups):.1f}}}",
         f"\\newcommand{{\\ClosureFamilyEagerOverheadMax}}{{{max(eager_overheads):.1f}}}",
+        f"\\newcommand{{\\ClosureFamilyEagerOverheadMin}}{{{min(eager_overheads):.1f}}}",
+        f"\\newcommand{{\\ClosureFamilyExactSetOverheadMax}}{{{max(exact_overheads):.2f}}}",
+        f"\\newcommand{{\\ClosureFamilyExactSetOverheadMin}}{{{min(exact_overheads):.2f}}}",
         f"\\newcommand{{\\ClosureFamilyMaxTriples}}{{{int(closure[-1]['candidate_dod_pairs']):,}}}",
         f"\\newcommand{{\\ClosureFamilyMaxClosure}}{{{int(closure[-1]['candidate_output'])}}}",
     ]
@@ -465,7 +481,29 @@ def generate_closure_family_artifacts(rows: List[Dict[str, Any]]) -> tuple[str, 
             f"{float(r['reference_over_candidate_time']):.0f}$\\times$ \\\\"
         )
     lines += ["\\bottomrule", "\\end{tabular}"]
-    return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
+
+    ablation = [
+        "% Auto-generated ablation table for the non-empty family",
+        "\\begin{tabular}{@{}rrrrrr@{}}",
+        "\\toprule",
+        "$k$ & \\emph{Full-Build} & \\emph{Exact-Set} & Overhead & \\emph{Full-Closure} & \\emph{Eager-Pairs} \\\\",
+        " & (ms) & (ms) & & (ms) & (ms, overhead) \\\\",
+        "\\midrule",
+    ]
+    for k in sorted(exact):
+        e = exact[k]
+        g = eager[k]
+        ablation.append(
+            f"{k} & {float(e['reference_median_ns']) / 1e6:.2f} & "
+            f"{float(e['candidate_median_ns']) / 1e6:.2f} & "
+            f"{float(e['candidate_over_reference_time']):.2f}$\\times$ & "
+            f"{float(g['reference_median_ns']) / 1e6:.2f} & "
+            f"{float(g['candidate_median_ns']) / 1e6:.2f} "
+            f"({float(g['candidate_over_reference_time']):.2f}$\\times$) \\\\"
+        )
+    ablation += ["\\bottomrule", "\\end{tabular}"]
+    return ("\n".join(macros) + "\n", "\n".join(lines) + "\n",
+            "\n".join(ablation) + "\n")
 
 
 def generate_exit_distribution_macros(rows: List[Dict[str, Any]]) -> str:
@@ -480,7 +518,6 @@ def generate_exit_distribution_macros(rows: List[Dict[str, Any]]) -> str:
     counted = {reason: sum(int(r[reason]) for r in rows) for reason in reasons}
     single_share = 100.0 * counted["single_entry"] / decisions if decisions else 0.0
     macros = [
-        "% Auto-generated Algorithm 2 exit-distribution macros by generate_paper_artifacts.py",
         f"\\newcommand{{\\BinaryDecisionCount}}{{{decisions:,}}}",
         f"\\newcommand{{\\SingleEntryExitPercent}}{{{single_share:.1f}}}",
         f"\\newcommand{{\\SingleEntryExitCount}}{{{counted['single_entry']:,}}}",
@@ -639,6 +676,11 @@ def main() -> None:
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     macros_code = generate_paper_macros(summary_rows)
+    # Appended to paper_macros.tex rather than written as a separate file, so
+    # the paper needs no extra \input for them.
+    exit_stats_file = args.results_dir / "dod_exit_stats.csv"
+    if exit_stats_file.is_file():
+        macros_code += generate_exit_distribution_macros(read_summary_csv(exit_stats_file))
     (args.output_dir / "paper_macros.tex").write_text(macros_code)
     print(f"Written: {args.output_dir / 'paper_macros.tex'}")
 
@@ -656,11 +698,13 @@ def main() -> None:
     if closure_summary.is_file():
         closure_rows = read_summary_csv(closure_summary)
         if closure_rows:
-            cf_macros, cf_table = generate_closure_family_artifacts(closure_rows)
+            cf_macros, cf_table, cf_ablation = generate_closure_family_artifacts(closure_rows)
             (args.output_dir / "closure_family_macros.tex").write_text(cf_macros)
             print(f"Written: {args.output_dir / 'closure_family_macros.tex'}")
             (args.output_dir / "tab_closure_family.tex").write_text(cf_table)
             print(f"Written: {args.output_dir / 'tab_closure_family.tex'}")
+            (args.output_dir / "tab_ablation_family.tex").write_text(cf_ablation)
+            print(f"Written: {args.output_dir / 'tab_ablation_family.tex'}")
     else:
         print(f"Note: {closure_summary} not found; skipping closure-family artifacts")
 
@@ -694,14 +738,6 @@ def main() -> None:
     else:
         print(f"Note: {closure_raw} not found; skipping output-sensitivity artifacts")
 
-    exit_stats = args.results_dir / "dod_exit_stats.csv"
-    if exit_stats.is_file():
-        (args.output_dir / "exit_distribution_macros.tex").write_text(
-            generate_exit_distribution_macros(read_summary_csv(exit_stats))
-        )
-        print(f"Written: {args.output_dir / 'exit_distribution_macros.tex'}")
-    else:
-        print(f"Note: {exit_stats} not found; skipping exit-distribution macros")
 
 
 if __name__ == "__main__":
