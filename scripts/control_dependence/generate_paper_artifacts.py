@@ -4,9 +4,8 @@
 Reads summary.csv, raw.csv, and metadata.json from evaluation runs, computes
 geometric means, quantiles, and paired statistics, and automatically generates:
 1. paper_macros.tex: LaTeX macro definitions for abstract/intro/eval placeholders
-2. tab_subjects.tex: Evaluation subjects table (Table 2)
-3. fig_rq1_results.tikz: Real-data TikZ scatter & bar plots (Figure 3)
-4. fig_rq1_closure.tikz: Real-data TikZ closure scatter plot (Figure 4)
+2. fig_rq1_results.tikz: Real-data TikZ scatter & bar plots (Figure 3)
+3. fig_rq1_closure.tikz: Real-data TikZ closure scatter plot (Figure 4)
 """
 
 from __future__ import annotations
@@ -227,62 +226,6 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
         f"\\newcommand{{\\EagerPairsOverheadMax}}{{{eager_pairs_max:.2f}}}",
     ]
     return "\n".join(macros) + "\n"
-
-
-def generate_subjects_table(summary_rows: List[Dict[str, Any]]) -> str:
-    """Generate LaTeX source for Table 2 (Evaluation subjects and sizes).
-
-    SPEC CPU2006 is enumerated per subject; the larger coreutils and open
-    suites are collapsed into aggregated rows so the table stays legible.
-    """
-    real_enum = [r for r in summary_rows
-                 if r.get("experiment") == "rq1-enumeration" and is_real_world(r)]
-
-    def sum_int(rows: List[Dict[str, Any]], key: str) -> int:
-        return sum(int(r.get(key, 0)) for r in rows)
-
-    by_suite: Dict[str, List[Dict[str, Any]]] = {"SPEC": [], "coreutils": [], "open": []}
-    for r in real_enum:
-        by_suite.setdefault(classify_suite(r), []).append(r)
-
-    lines = [
-        "% Auto-generated subjects table for Table 2",
-        "\\begin{tabular}{@{}llrrrr@{}}",
-        "\\toprule",
-        "Subject & Benchmark Suite & Funcs & $|V|$ & $|E|$ & Decisions \\\\",
-        "\\midrule",
-    ]
-    for r in sorted(by_suite["SPEC"], key=lambda x: x["benchmark"]):
-        clean = r["benchmark"].replace(".bc", "").replace(".ll", "")
-        lines.append(
-            f"\\texttt{{{clean}}} & SPEC CPU2006 & "
-            f"{int(r.get('functions', 0)):,} & {int(r.get('nodes', 0)):,} & "
-            f"{int(r.get('edges', 0)):,} & {int(r.get('decisions', 0)):,} \\\\"
-        )
-    for suite, label in (("coreutils", "GNU Coreutils"), ("open", "Open-source apps")):
-        rows = by_suite[suite]
-        if not rows:
-            continue
-        lines.append("\\midrule")
-        lines.append(
-            f"{len(rows)} programs & {label} & "
-            f"{sum_int(rows, 'functions'):,} & {sum_int(rows, 'nodes'):,} & "
-            f"{sum_int(rows, 'edges'):,} & {sum_int(rows, 'decisions'):,} \\\\"
-        )
-
-    total_funcs = sum_int(real_enum, "functions")
-    total_nodes = sum_int(real_enum, "nodes")
-    total_edges = sum_int(real_enum, "edges")
-    total_decisions = sum_int(real_enum, "decisions")
-    lines.extend([
-        "\\midrule",
-        f"\\textbf{{Total}} & \\textbf{{{len(real_enum)} subjects}} & "
-        f"\\textbf{{{total_funcs:,}}} & \\textbf{{{total_nodes:,}}} & "
-        f"\\textbf{{{total_edges:,}}} & \\textbf{{{total_decisions:,}}} \\\\",
-        "\\bottomrule",
-        "\\end{tabular}",
-    ])
-    return "\n".join(lines) + "\n"
 
 
 def generate_figures_tikz(summary_rows: List[Dict[str, Any]]) -> tuple[str, str]:
@@ -506,6 +449,114 @@ def generate_closure_family_artifacts(rows: List[Dict[str, Any]]) -> tuple[str, 
             "\n".join(ablation) + "\n")
 
 
+def generate_guard_artifacts(
+    summary_rows: List[Dict[str, Any]], raw_rows: List[Dict[str, Any]]
+) -> tuple[str, str]:
+    """Macros and a table for the reducibility-guarded enumeration baselines.
+
+    The guard answers "why not test reducibility first and skip DOD?".  It holds
+    when the part reachable from the entry is reducible and no unreachable
+    binary decision reaches a cycle, and its cost is inside analysis_ns.  All
+    three experiments come from one run, so the unguarded geometric mean here is
+    the honest anchor for the guarded ones.
+    """
+
+    unguarded = "rq1-enumeration"
+    sota = "rq1-enumeration-guarded-sota"
+    both = "rq1-enumeration-guarded-both"
+
+    def by_subject(experiment: str, real: bool = True) -> Dict[str, Dict[str, Any]]:
+        return {
+            r["benchmark"]: r
+            for r in summary_rows
+            if r.get("experiment") == experiment and is_real_world(r) == real
+        }
+
+    rows = {name: by_subject(name) for name in (unguarded, sota, both)}
+    subjects = sorted(set(rows[unguarded]) & set(rows[sota]) & set(rows[both]))
+
+    # Functions the guard could not skip, from the guarded SOTA runs of each
+    # subject: every run of one subject sees the same functions.
+    unskipped: Dict[str, int] = {}
+    functions: Dict[str, int] = {}
+    guard_ns = 0
+    guarded_analysis_ns = 0
+    synthetic_skipped = 0
+    for r in raw_rows:
+        if "--reducibility-guard" not in r.get("command", ""):
+            continue
+        if "synthetic" in r["input"] or "synthetic" in r["benchmark"]:
+            synthetic_skipped += int(r["guard_skipped"])
+            continue
+        if r.get("experiment") == both and r["implementation"] == "candidate":
+            guard_ns += int(r["guard_ns"])
+            guarded_analysis_ns += int(r["analysis_ns"])
+        if r.get("experiment") == sota:
+            functions[r["benchmark"]] = int(r["functions"])
+            unskipped[r["benchmark"]] = int(r["functions"]) - int(r["guard_skipped"])
+
+    irreducible = sorted(
+        (b for b in subjects if unskipped.get(b, 0) > 0),
+        key=lambda b: (-unskipped[b], b),
+    )
+    reducible = [b for b in subjects if unskipped.get(b, 0) == 0]
+
+    def speedup(experiment: str, subject: str) -> float:
+        return float(rows[experiment][subject]["reference_over_candidate_time"])
+
+    def geo(experiment: str, group: Sequence[str]) -> float:
+        return geometric_mean([speedup(experiment, b) for b in group]) if group else 1.0
+
+    both_speedups = [speedup(both, b) for b in subjects]
+    total_functions = sum(functions.get(b, 0) for b in subjects)
+    total_unskipped = sum(unskipped.get(b, 0) for b in subjects)
+    skipped_percent = (
+        100.0 * (total_functions - total_unskipped) / total_functions
+        if total_functions else 0.0
+    )
+
+    macros = [
+        "% Auto-generated reducibility-guard macros by generate_paper_artifacts.py",
+        f"\\newcommand{{\\GuardSubjectCount}}{{{len(subjects)}}}",
+        f"\\newcommand{{\\GuardFunctionCount}}{{{total_functions:,}}}",
+        f"\\newcommand{{\\GuardSkippedPercent}}{{{skipped_percent:.2f}}}",
+        f"\\newcommand{{\\GuardIrreducibleFunctionCount}}{{{total_unskipped}}}",
+        f"\\newcommand{{\\GuardIrreducibleSubjectCount}}{{{len(irreducible)}}}",
+        # Share of the guarded candidate's own analysis time spent in the check.
+        f"\\newcommand{{\\GuardCostPercent}}{{{100.0 * guard_ns / guarded_analysis_ns if guarded_analysis_ns else 0.0:.1f}}}",
+        f"\\newcommand{{\\GuardUnguardedGeomean}}{{{geo(unguarded, subjects):.2f}}}",
+        f"\\newcommand{{\\GuardSotaGeomean}}{{{geo(sota, subjects):.2f}}}",
+        f"\\newcommand{{\\GuardBothGeomean}}{{{geo(both, subjects):.2f}}}",
+        f"\\newcommand{{\\GuardBothIrreducibleGeomean}}{{{geo(both, irreducible):.2f}}}",
+        f"\\newcommand{{\\GuardBothReducibleGeomean}}{{{geo(both, reducible):.2f}}}",
+        f"\\newcommand{{\\GuardBothMin}}{{{min(both_speedups):.2f}}}",
+        f"\\newcommand{{\\GuardBothMax}}{{{max(both_speedups):.2f}}}",
+        f"\\newcommand{{\\GuardSotaFullSlowerCount}}{{{sum(1 for b in subjects if speedup(sota, b) < 1.0)}}}",
+        # The guard never fires on the nonempty family, so those results stand.
+        f"\\newcommand{{\\GuardSyntheticSkippedCount}}{{{synthetic_skipped}}}",
+    ]
+
+    lines = [
+        "% Auto-generated guarded-baseline table by generate_paper_artifacts.py",
+        "\\begin{tabular}{@{}lrrrr@{}}",
+        "\\toprule",
+        "Subject & Irreducible & \\emph{SOTA} & \\emph{SOTA+Guard} & \\emph{Both+Guard} \\\\",
+        " & functions & speedup & speedup & speedup \\\\",
+        "\\midrule",
+    ]
+    for subject in irreducible:
+        name = subject.replace(".bc", "").replace(".ll", "").replace("_", "\\_")
+        lines.append(
+            f"\\texttt{{{name}}} & {unskipped[subject]} & "
+            f"{speedup(unguarded, subject):.2f}$\\times$ & "
+            f"{speedup(sota, subject):.2f}$\\times$ & "
+            f"{speedup(both, subject):.2f}$\\times$ \\\\"
+        )
+    lines += ["\\bottomrule", "\\end{tabular}"]
+
+    return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
+
+
 def generate_exit_distribution_macros(rows: List[Dict[str, Any]]) -> str:
     """Macros describing where Algorithm 2 leaves each real binary decision.
 
@@ -660,6 +711,12 @@ def main() -> None:
         help="Path to the non-trivial-closure family results directory",
     )
     parser.add_argument(
+        "--guard-results-dir",
+        type=Path,
+        default=LOTUS_ROOT / "control-dependence-guard-results",
+        help="Path to the reducibility-guarded enumeration results directory",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=WORKSPACE_ROOT / "paper-control-dep" / "sections" / "generated",
@@ -683,10 +740,6 @@ def main() -> None:
         macros_code += generate_exit_distribution_macros(read_summary_csv(exit_stats_file))
     (args.output_dir / "paper_macros.tex").write_text(macros_code)
     print(f"Written: {args.output_dir / 'paper_macros.tex'}")
-
-    table_code = generate_subjects_table(summary_rows)
-    (args.output_dir / "tab_subjects.tex").write_text(table_code)
-    print(f"Written: {args.output_dir / 'tab_subjects.tex'}")
 
     fig3_tikz, fig4_tikz = generate_figures_tikz(summary_rows)
     (args.output_dir / "fig_rq1_results.tikz").write_text(fig3_tikz)
@@ -737,6 +790,19 @@ def main() -> None:
         print(f"Written: {args.output_dir / 'tab_output_sensitivity.tex'}")
     else:
         print(f"Note: {closure_raw} not found; skipping output-sensitivity artifacts")
+
+    guard_summary = args.guard_results_dir / "summary.csv"
+    guard_raw = args.guard_results_dir / "raw.csv"
+    if guard_summary.is_file() and guard_raw.is_file():
+        g_macros, g_table = generate_guard_artifacts(
+            read_summary_csv(guard_summary), read_summary_csv(guard_raw)
+        )
+        (args.output_dir / "guard_macros.tex").write_text(g_macros)
+        print(f"Written: {args.output_dir / 'guard_macros.tex'}")
+        (args.output_dir / "tab_guard.tex").write_text(g_table)
+        print(f"Written: {args.output_dir / 'tab_guard.tex'}")
+    else:
+        print(f"Note: {guard_summary} not found; skipping reducibility-guard artifacts")
 
 
 
