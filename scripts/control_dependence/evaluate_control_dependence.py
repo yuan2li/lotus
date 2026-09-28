@@ -25,6 +25,12 @@ Paper-to-driver map
 ``rq2-consumption``
     Full-Closure vs. Eager-Pairs. Eager-Pairs uses the same compact construction
     but expands and indexes all K cross-side pairs before closure.
+``rq1-enumeration-guarded-sota`` / ``rq1-enumeration-guarded-both``
+    rq1-enumeration with the driver's ``--reducibility-guard`` on the SOTA side
+    only, or on both sides. The guard skips DOD when the part reachable from
+    the entry is reducible and no unreachable decision reaches a cycle; its
+    cost is included in ``analysis_ns``. These answer "why not check
+    reducibility first?" and are not run by default.
 
 The driver reports ``K`` as ``dod_pairs`` and the compact incidence count ``C``
 as ``incidences``. Their ratio K/C is the paper's representation-compression
@@ -80,6 +86,14 @@ class Experiment:
     candidate_label: str
     visit_pairs: bool = False
     result_field: str = "dependencies"
+    # Extra driver flags for one side only, such as --reducibility-guard.
+    reference_args: tuple[str, ...] = ()
+    candidate_args: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Samples are keyed by algorithm name, so the two sides must differ.
+        if self.reference == self.candidate:
+            raise ValueError("reference and candidate algorithms must differ")
 
 
 # RQ1: external, identical-output comparisons against the state of the art.
@@ -119,7 +133,38 @@ EXPERIMENTS: dict[str, Experiment] = {
         "Eager-Pairs",
         result_field="closure_size",
     ),
+    # Reducibility-guarded baselines: the SOTA side, or both sides, first check
+    # whether DOD is provably empty and skip the algorithm when it is.
+    "rq1-enumeration-guarded-sota": Experiment(
+        "RQ1",
+        "dod",
+        "dod-compact",
+        "SOTA-Enumerate+Guard",
+        "Full-Enumerate",
+        visit_pairs=True,
+        result_field="dod_pairs",
+        reference_args=("--reducibility-guard",),
+    ),
+    "rq1-enumeration-guarded-both": Experiment(
+        "RQ1",
+        "dod",
+        "dod-compact",
+        "SOTA-Enumerate+Guard",
+        "Full-Enumerate+Guard",
+        visit_pairs=True,
+        result_field="dod_pairs",
+        reference_args=("--reducibility-guard",),
+        candidate_args=("--reducibility-guard",),
+    ),
 }
+
+# The paper's main evaluation; the guarded variants are opt-in.
+DEFAULT_EXPERIMENTS = (
+    "rq1-enumeration",
+    "rq1-closure",
+    "rq2-cardinality",
+    "rq2-consumption",
+)
 
 # Per-function times are additive when a bitcode file contains many functions.
 # The driver measures each phase independently; analysis_ns covers their full
@@ -163,8 +208,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--experiments",
-        default=",".join(EXPERIMENTS),
-        help="comma-separated names: " + ",".join(EXPERIMENTS),
+        default=",".join(DEFAULT_EXPERIMENTS),
+        help=(
+            "comma-separated names (default: "
+            + ",".join(DEFAULT_EXPERIMENTS)
+            + "); available: "
+            + ",".join(EXPERIMENTS)
+        ),
     )
     parser.add_argument("--repeat", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=3)
@@ -270,6 +320,9 @@ def aggregate_driver_rows(rows: list[dict[str, str]]) -> dict[str, int | str]:
     for field in COUNT_FIELDS[1:] + TIMING_FIELDS:
         result[field] = sum(int(row[field]) for row in rows)
     result["peak_rss_kb"] = max(int(row["peak_rss_kb"]) for row in rows)
+    # Reducibility-guard columns; absent from drivers that predate the guard.
+    result["guard_ns"] = sum(int(row.get("guard_ns", 0)) for row in rows)
+    result["guard_skipped"] = sum(int(row.get("guard_skipped", 0)) for row in rows)
     result["result_fingerprint"] = sum(
         int(row["result_fingerprint"]) for row in rows
     ) & ((1 << 64) - 1)
@@ -304,6 +357,11 @@ def run_driver(
     if experiment.visit_pairs:
         # RQ1 enumeration must pay for visiting all K triples on both sides.
         command.append("--visit-pairs")
+    command.extend(
+        experiment.reference_args
+        if algorithm == experiment.reference
+        else experiment.candidate_args
+    )
     if function:
         command.append(f"--function={function}")
     if algorithm in {
