@@ -12,6 +12,7 @@ scripts for Lotus control-dependence analysis.
 | `generate_paper_artifacts.py` | Post-processing pipeline. Reads `summary.csv`, aggregates statistics, and automatically generates LaTeX macros (`paper_macros.tex`), tables (closure family, seed sweep, ablations, reducibility guard), and TikZ figures (`fig_rq1_results.tikz`, `fig_rq1_closure.tikz`). |
 | `sweep_closure_seeds.py` | Sweeps the closure seed-set size `|W|` over the `closure_k*.ll` family with randomly drawn seeds, reporting the speedup distribution rather than one seeding. Emits `closure_seed_sweep{,_raw}.csv`. |
 | `function_size_distribution.py` | Re-runs the Full variants over the evaluated real-world subjects and describes the per-function CFG size distribution: size percentiles and, per size bucket, the share of functions, vertices, and Full-Enumerate/Full-Closure analysis time. Emits `function_sizes.csv`. |
+| `svcomp_corpus.py` | Rebuilds the SV-COMP 2020 function corpus of the CAV'21 DOD evaluation (`sv-benchmarks` tag `svcomp20`): compiles every source file, measures each function with the driver, keeps those with at least 100 basic blocks, removes duplicates, and reports the functions whose DOD relation is nonempty. Emits `corpus_functions.csv` and `corpus_summary.json`. |
 
 ## Usage Examples
 
