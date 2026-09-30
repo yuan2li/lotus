@@ -10,6 +10,11 @@ For each ``closure_k*.ll`` and each |W|, the harness runs ``--trials``
 independent draws (distinct ``--seed-rng`` values) of SOTA-Closure and
 Full-Closure, checks that they agree, and records the speedup distribution.
 
+``--sota-algorithm`` selects the prior closure: ``strong-closure`` (Danicic et
+al.'s algorithm, the default) or ``ntscd-dod-closure`` (Chalupa et al.'s NTSCD
+and DOD closure). Draws depend only on |W| and the trial, so both baselines
+see identical seed sets.
+
 Outputs ``closure_seed_sweep.csv`` (one row per instance/|W|) plus a
 ``closure_seed_sweep_raw.csv`` with every trial.
 """
@@ -64,6 +69,9 @@ def main() -> int:
     parser.add_argument("--repeat", type=int, default=3,
                         help="timed runs per draw; the minimum is kept")
     parser.add_argument("--timeout", type=float, default=600.0)
+    parser.add_argument("--sota-algorithm", default="strong-closure",
+                        choices=["strong-closure", "ntscd-dod-closure"],
+                        help="driver algorithm used as SOTA-Closure")
     parser.add_argument("--output-dir", type=Path,
                         default=LOTUS_ROOT / "control-dependence-results-closure")
     args = parser.parse_args()
@@ -88,7 +96,7 @@ def main() -> int:
             for trial in range(args.trials):
                 # rng 0 would mean "even spread"; offset so every draw is random.
                 rng = 1000 * size + trial + 1
-                sota = run(args.tool, path, "strong-closure", size, rng,
+                sota = run(args.tool, path, args.sota_algorithm, size, rng,
                            args.repeat, args.timeout)
                 full = run(args.tool, path, "compact-closure", size, rng,
                            args.repeat, args.timeout)

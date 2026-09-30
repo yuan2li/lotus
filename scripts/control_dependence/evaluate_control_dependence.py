@@ -31,6 +31,12 @@ Paper-to-driver map
     the entry is reducible and no unreachable decision reaches a cycle; its
     cost is included in ``analysis_ns``. These answer "why not check
     reducibility first?" and are not run by default.
+``rq1-closure-cav21`` and its ``-guarded-sota`` / ``-guarded-both`` variants
+    Full-Closure against Chalupa et al.'s NTSCD and DOD closure (CAV'21,
+    Definition 10), which materializes both relations and closes the seed by
+    backward reachability. Unlike ``strong-closure`` (Danicic et al.'s
+    algorithm), it computes DOD separately, so the guard can skip that part on
+    either side. Not run by default.
 
 The driver reports ``K`` as ``dod_pairs`` and the compact incidence count ``C``
 as ``incidences``. Their ratio K/C is the paper's representation-compression
@@ -153,6 +159,35 @@ EXPERIMENTS: dict[str, Experiment] = {
         "Full-Enumerate+Guard",
         visit_pairs=True,
         result_field="dod_pairs",
+        reference_args=("--reducibility-guard",),
+        candidate_args=("--reducibility-guard",),
+    ),
+    # Closure against the relation-based prior closure, which, unlike
+    # strong-closure, computes DOD separately and so admits the same guard.
+    "rq1-closure-cav21": Experiment(
+        "RQ1",
+        "ntscd-dod-closure",
+        "compact-closure",
+        "SOTA-Closure-CAV21",
+        "Full-Closure",
+        result_field="closure_size",
+    ),
+    "rq1-closure-cav21-guarded-sota": Experiment(
+        "RQ1",
+        "ntscd-dod-closure",
+        "compact-closure",
+        "SOTA-Closure-CAV21+Guard",
+        "Full-Closure",
+        result_field="closure_size",
+        reference_args=("--reducibility-guard",),
+    ),
+    "rq1-closure-cav21-guarded-both": Experiment(
+        "RQ1",
+        "ntscd-dod-closure",
+        "compact-closure",
+        "SOTA-Closure-CAV21+Guard",
+        "Full-Closure+Guard",
+        result_field="closure_size",
         reference_args=("--reducibility-guard",),
         candidate_args=("--reducibility-guard",),
     ),
@@ -366,6 +401,7 @@ def run_driver(
         command.append(f"--function={function}")
     if algorithm in {
         "strong-closure",
+        "ntscd-dod-closure",
         "compact-closure",
         "compact-closure-eager-pairs",
     }:

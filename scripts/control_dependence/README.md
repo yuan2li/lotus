@@ -10,7 +10,7 @@ scripts for Lotus control-dependence analysis.
 | `evaluate_control_dependence.py` | Driver orchestration for reproducible multi-benchmark evaluation (RQ1 & RQ2). Handles warmups, randomized run orders, repetitions, cross-variant output checks, and CSV metrics emission. |
 | `synthetic_family.py` | Generator and theoretical validator for the Proposition 5.1 synthetic graph family. Emits LLVM IR (`.ll`) benchmarks exhibiting cubic output ($K = k^3$) with quadratic bicliques ($C = 2k^2$). |
 | `generate_paper_artifacts.py` | Post-processing pipeline. Reads `summary.csv`, aggregates statistics, and automatically generates LaTeX macros (`paper_macros.tex`), tables (closure family, seed sweep, ablations, reducibility guard), and a three-panel TikZ figure (`fig_rq1_results.tikz`: enumeration and closure scatters plus the K/C bars). |
-| `sweep_closure_seeds.py` | Sweeps the closure seed-set size `|W|` over the `closure_k*.ll` family with randomly drawn seeds, reporting the speedup distribution rather than one seeding. Emits `closure_seed_sweep{,_raw}.csv`. |
+| `sweep_closure_seeds.py` | Sweeps the closure seed-set size `|W|` over the `closure_k*.ll` family with randomly drawn seeds, reporting the speedup distribution rather than one seeding. `--sota-algorithm ntscd-dod-closure` swaps Danicic et al.'s closure for Chalupa et al.'s NTSCD and DOD closure. Emits `closure_seed_sweep{,_raw}.csv`. |
 | `function_size_distribution.py` | Re-runs the Full variants over the evaluated real-world subjects and describes the per-function CFG size distribution: size percentiles and, per size bucket, the share of functions, vertices, and Full-Enumerate/Full-Closure analysis time. Emits `function_sizes.csv`. |
 | `svcomp_corpus.py` | Rebuilds the SV-COMP 2020 function corpus of the CAV'21 DOD evaluation (`sv-benchmarks` tag `svcomp20`): compiles every source file, measures each function with the driver, keeps those with at least 100 basic blocks, removes duplicates, and reports the functions whose DOD relation is nonempty. Emits `corpus_functions.csv` and `corpus_summary.json`. |
 
@@ -32,6 +32,19 @@ python3 scripts/control_dependence/generate_paper_artifacts.py
 
 # 4. Sweep the closure seed-set size with randomly drawn seeds
 python3 scripts/control_dependence/sweep_closure_seeds.py --sizes 1 2 4 8 16 32 64 --trials 10
+
+# 5. Closure against Chalupa et al.'s NTSCD and DOD closure (CAV'21), real
+#    subjects with and without the reducibility guard, then the non-empty family
+python3 scripts/control_dependence/evaluate_control_dependence.py \
+  ../coreutils benchmarks/real-world/SPEC2006 benchmarks/synthetic ../open \
+  --experiments rq1-closure,rq1-closure-cav21,rq1-closure-cav21-guarded-sota,rq1-closure-cav21-guarded-both \
+  --repeat 5 --warmup 1 --timeout 300 --keep-going \
+  --output-dir control-dependence-closure-guard-results
+python3 scripts/control_dependence/evaluate_control_dependence.py \
+  benchmarks/synthetic/closure_k*.ll --experiments rq1-closure,rq1-closure-cav21 \
+  --repeat 5 --warmup 1 --seed-count 4 --output-dir control-dependence-closure-cav21-family
+python3 scripts/control_dependence/sweep_closure_seeds.py --sizes 1 2 4 8 16 32 64 --trials 10 \
+  --sota-algorithm ntscd-dod-closure --output-dir control-dependence-closure-cav21-family
 ```
 
 ## Running the control-dependence unit tests
