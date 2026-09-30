@@ -42,7 +42,7 @@ cl::opt<std::string> AlgorithmName(
     "algorithm",
     cl::desc("ntscd2, ntscd-compact, dod, dod-compact, dod-ntscd, "
              "dod-compact-exact-set, dod-ntscd-compact, strong-closure, "
-             "compact-closure, compact-closure-eager-pairs"),
+             "ntscd-dod-closure, compact-closure, compact-closure-eager-pairs"),
     cl::init("dod-compact"));
 cl::opt<bool> VisitPairs(
     "visit-pairs",
@@ -80,8 +80,9 @@ cl::opt<bool> ReducibilityGuard(
     "reducibility-guard",
     cl::desc(
         "For DOD algorithms, first check isDODEmptyByReducibility and skip "
-        "the algorithm when it holds; the check is timed in analysis_ns "
-        "and reported as guard_ns"),
+        "the algorithm when it holds; for closure algorithms that compute DOD "
+        "separately, skip only the DOD part. The check is timed in "
+        "analysis_ns and reported as guard_ns"),
     cl::init(false));
 cl::opt<bool> LowerSwitch(
     "lower-switch",
@@ -98,6 +99,7 @@ enum class Algorithm {
   DODNTSCD,
   DODNTSCDCompact,
   StrongClosure,
+  NTSCDDODClosure,
   CompactClosure,
   CompactClosureEagerPairs,
 };
@@ -119,6 +121,8 @@ Algorithm parseAlgorithm(StringRef name) {
     return Algorithm::DODNTSCDCompact;
   if (name == "strong-closure")
     return Algorithm::StrongClosure;
+  if (name == "ntscd-dod-closure")
+    return Algorithm::NTSCDDODClosure;
   if (name == "compact-closure")
     return Algorithm::CompactClosure;
   if (name == "compact-closure-eager-pairs")
@@ -144,6 +148,8 @@ StringRef nameOf(Algorithm algorithm) {
     return "dod-ntscd-compact";
   case Algorithm::StrongClosure:
     return "strong-closure";
+  case Algorithm::NTSCDDODClosure:
+    return "ntscd-dod-closure";
   case Algorithm::CompactClosure:
     return "compact-closure";
   case Algorithm::CompactClosureEagerPairs:
@@ -157,8 +163,14 @@ bool isDOD(Algorithm a) {
          a == Algorithm::DODCompactExactSet;
 }
 bool isClosure(Algorithm a) {
-  return a == Algorithm::StrongClosure || a == Algorithm::CompactClosure ||
+  return a == Algorithm::StrongClosure || a == Algorithm::NTSCDDODClosure ||
+         a == Algorithm::CompactClosure ||
          a == Algorithm::CompactClosureEagerPairs;
+}
+// Danicic et al.'s strong closure never computes DOD on its own, so the
+// reducibility guard has nothing to skip there.
+bool acceptsGuard(Algorithm a) {
+  return isDOD(a) || (isClosure(a) && a != Algorithm::StrongClosure);
 }
 
 struct FunctionGraph {
@@ -309,7 +321,8 @@ Record run(Function &function, FunctionGraph &fg, Algorithm algorithm) {
     r.guardNS = elapsed(start);
     // A skipped function reports an empty DOD: every count and the
     // fingerprint stay zero, as they would after running the algorithm.
-    if (r.guardSkipped) {
+    // Closure algorithms still run, without their DOD part.
+    if (r.guardSkipped && isDOD(algorithm)) {
       r.totalNS = elapsed(totalStart);
       r.peakRSSKB = peakRSSKB();
       return r;
@@ -404,6 +417,14 @@ Record run(Function &function, FunctionGraph &fg, Algorithm algorithm) {
     r.closureNS = elapsed(start);
     break;
   }
+  case Algorithm::NTSCDDODClosure: {
+    // Relations and closure are one pass here, so all time is closure_ns.
+    auto start = Clock::now();
+    closure =
+        computeBaselineDependencyClosure(fg.graph, fg.seed(), !r.guardSkipped);
+    r.closureNS = elapsed(start);
+    break;
+  }
   case Algorithm::CompactClosure: {
     auto start = Clock::now();
     Inevitability inevitable = computeInevitability(fg.graph);
@@ -411,9 +432,11 @@ Record run(Function &function, FunctionGraph &fg, Algorithm algorithm) {
     start = Clock::now();
     ntscd = computeCompactNTSCD(fg.graph, inevitable);
     r.ntscdNS = elapsed(start);
-    start = Clock::now();
-    bicliques = computeCompactDOD(fg.graph, inevitable);
-    r.dodNS = elapsed(start);
+    if (!r.guardSkipped) {
+      start = Clock::now();
+      bicliques = computeCompactDOD(fg.graph, inevitable);
+      r.dodNS = elapsed(start);
+    }
     start = Clock::now();
     closure =
         computeCompactDependencyClosure(fg.graph, fg.seed(), ntscd, bicliques);
@@ -427,9 +450,11 @@ Record run(Function &function, FunctionGraph &fg, Algorithm algorithm) {
     start = Clock::now();
     ntscd = computeCompactNTSCD(fg.graph, inevitable);
     r.ntscdNS = elapsed(start);
-    start = Clock::now();
-    bicliques = computeCompactDOD(fg.graph, inevitable);
-    r.dodNS = elapsed(start);
+    if (!r.guardSkipped) {
+      start = Clock::now();
+      bicliques = computeCompactDOD(fg.graph, inevitable);
+      r.dodNS = elapsed(start);
+    }
     start = Clock::now();
     closure = computeEagerPairDependencyClosure(fg.graph, fg.seed(), ntscd,
                                                 bicliques);
@@ -557,8 +582,9 @@ int main(int argc, char **argv) {
   Algorithm algorithm = parseAlgorithm(AlgorithmName);
   if (VisitPairs && !isDOD(algorithm))
     report_fatal_error("--visit-pairs is valid only for DOD algorithms");
-  if (ReducibilityGuard && !isDOD(algorithm))
-    report_fatal_error("--reducibility-guard is valid only for DOD algorithms");
+  if (ReducibilityGuard && !acceptsGuard(algorithm))
+    report_fatal_error("--reducibility-guard is valid only for DOD algorithms "
+                       "and closures that compute DOD separately");
   if ((!SeedIndices.empty() || SeedCount > 0 || SeedRng > 0) && !isClosure(algorithm))
     report_fatal_error("--seed-index is valid only for closure algorithms");
 
