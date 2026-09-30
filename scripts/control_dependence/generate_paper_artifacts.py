@@ -557,6 +557,71 @@ def generate_guard_artifacts(
     return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
 
 
+def generate_closure_guard_macros(
+    summary_rows: List[Dict[str, Any]], raw_rows: List[Dict[str, Any]]
+) -> str:
+    """Macros comparing Full-Closure with both prior closure algorithms.
+
+    ``rq1-closure`` uses Danicic et al.'s strong control closure, which never
+    computes DOD on its own; ``rq1-closure-cav21`` uses Chalupa et al.'s NTSCD
+    and DOD closure, which does, and so admits the reducibility guard on the
+    SOTA side or on both sides.  All four experiments come from one run, so the
+    geometric means are directly comparable.
+    """
+
+    danicic = "rq1-closure"
+    cav = "rq1-closure-cav21"
+    sota = "rq1-closure-cav21-guarded-sota"
+    both = "rq1-closure-cav21-guarded-both"
+    experiments = (danicic, cav, sota, both)
+    rows = {
+        name: {r["benchmark"]: r for r in summary_rows
+               if r.get("experiment") == name and is_real_world(r)}
+        for name in experiments
+    }
+    subjects = sorted(set.intersection(*(set(rows[name]) for name in experiments)))
+    synthetic = [r for r in summary_rows
+                 if r.get("experiment") == cav and not is_real_world(r)]
+
+    def speedups(experiment: str) -> List[float]:
+        return [float(rows[experiment][b]["reference_over_candidate_time"]) for b in subjects]
+
+    # How much slower the older closure is than the relation-based one.
+    danicic_over_cav = [
+        float(rows[danicic][b]["reference_median_ns"])
+        / float(rows[cav][b]["reference_median_ns"])
+        for b in subjects
+    ]
+    synthetic_skipped = sum(
+        int(r["guard_skipped"]) for r in raw_rows
+        if "--reducibility-guard" in r.get("command", "")
+        and ("synthetic" in r["input"] or "synthetic" in r["benchmark"])
+    )
+
+    macros = [
+        "% Auto-generated closure-baseline and guard macros by generate_paper_artifacts.py",
+        f"\\newcommand{{\\ClosureGuardSubjectCount}}{{{len(subjects)}}}",
+        f"\\newcommand{{\\ClosureDanicicGeomean}}{{{geometric_mean(speedups(danicic)):.2f}}}",
+        f"\\newcommand{{\\ClosureDanicicOverCavGeomean}}{{{geometric_mean(danicic_over_cav):.2f}}}",
+    ]
+    for name, experiment in (("Cav", cav), ("CavGuardSota", sota), ("CavGuardBoth", both)):
+        values = speedups(experiment)
+        macros += [
+            f"\\newcommand{{\\Closure{name}Geomean}}{{{geometric_mean(values):.2f}}}",
+            f"\\newcommand{{\\Closure{name}Min}}{{{min(values):.2f}}}",
+            f"\\newcommand{{\\Closure{name}Max}}{{{max(values):.2f}}}",
+            f"\\newcommand{{\\Closure{name}SlowerCount}}{{{sum(1 for v in values if v < 1.0)}}}",
+        ]
+    if synthetic:
+        values = [float(r["reference_over_candidate_time"]) for r in synthetic]
+        macros += [
+            f"\\newcommand{{\\ClosureCavSyntheticGeomean}}{{{geometric_mean(values):.2f}}}",
+            f"\\newcommand{{\\ClosureCavSyntheticMax}}{{{max(values):.2f}}}",
+        ]
+    macros.append(f"\\newcommand{{\\ClosureGuardSyntheticSkippedCount}}{{{synthetic_skipped}}}")
+    return "\n".join(macros) + "\n"
+
+
 def generate_exit_distribution_macros(rows: List[Dict[str, Any]]) -> str:
     """Macros describing where Algorithm 2 leaves each real binary decision.
 
@@ -630,9 +695,53 @@ def generate_output_sensitivity_artifacts(raw_rows: List[Dict[str, Any]]) -> tup
     return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
 
 
+def generate_closure_cav21_family_artifacts(rows: List[Dict[str, Any]]) -> tuple[str, str]:
+    """Macros and a table for the non-empty closure family against both priors.
+
+    ``rq1-closure`` uses Danicic et al.'s strong control closure and
+    ``rq1-closure-cav21`` Chalupa et al.'s NTSCD and DOD closure; both come
+    from one run with the same seeds, so the two speedup columns are comparable.
+    """
+    def k_of(row: Dict[str, Any]) -> int:
+        return int(str(row["benchmark"]).replace("closure_k", "").replace(".ll", ""))
+
+    danicic = {k_of(r): r for r in rows if r.get("experiment") == "rq1-closure"}
+    cav = {k_of(r): r for r in rows if r.get("experiment") == "rq1-closure-cav21"}
+    ks = sorted(set(danicic) & set(cav))
+    speedups = [float(cav[k]["reference_over_candidate_time"]) for k in ks]
+
+    macros = [
+        "% Auto-generated CAV'21-baseline closure-family macros by generate_paper_artifacts.py",
+        f"\\newcommand{{\\ClosureCavFamilySpeedupGeomean}}{{{geometric_mean(speedups):.1f}}}",
+        f"\\newcommand{{\\ClosureCavFamilySpeedupMin}}{{{min(speedups):.1f}}}",
+        f"\\newcommand{{\\ClosureCavFamilySpeedupMax}}{{{max(speedups):.1f}}}",
+        f"\\newcommand{{\\ClosureCavFamilyMaxK}}{{{ks[-1]}}}",
+    ]
+    lines = [
+        "% Auto-generated closure-family table against both prior closures",
+        "\\begin{tabular}{@{}rrrrrrr@{}}",
+        "\\toprule",
+        "$k$ & $|W'|$ & Danicic (ms) & CAV'21 (ms) & Full (ms) & vs.\\ Danicic & vs.\\ CAV'21 \\\\",
+        "\\midrule",
+    ]
+    for k in ks:
+        d, c = danicic[k], cav[k]
+        lines.append(
+            f"{k} & {int(c['candidate_output'])} & "
+            f"{float(d['reference_median_ns']) / 1e6:.2f} & "
+            f"{float(c['reference_median_ns']) / 1e6:.2f} & "
+            f"{float(c['candidate_median_ns']) / 1e6:.2f} & "
+            f"{float(d['reference_over_candidate_time']):.0f}$\\times$ & "
+            f"{float(c['reference_over_candidate_time']):.1f}$\\times$ \\\\"
+        )
+    lines += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
+
+
 def generate_seed_sweep_artifacts(
     summary: List[Dict[str, Any]], raw: List[Dict[str, Any]],
     family_rows: Sequence[Dict[str, Any]] = (), fixed_seed_count: int = 4,
+    prefix: str = "Closure", family_experiment: str = "rq1-closure",
 ) -> tuple[str, str]:
     """Macros and a table for the closure seed-set sensitivity sweep.
 
@@ -650,22 +759,24 @@ def generate_seed_sweep_artifacts(
     q3 = speedups[3 * len(speedups) // 4]
 
     macros = [
-        "% Auto-generated closure seed-sweep macros by generate_paper_artifacts.py",
-        f"\\newcommand{{\\ClosureSweepTrials}}{{{len(non_degenerate)}}}",
-        f"\\newcommand{{\\ClosureSweepMedian}}{{{median:.0f}}}",
-        f"\\newcommand{{\\ClosureSweepQOne}}{{{q1:.0f}}}",
-        f"\\newcommand{{\\ClosureSweepQThree}}{{{q3:.0f}}}",
-        f"\\newcommand{{\\ClosureSweepMin}}{{{min(speedups):.1f}}}",
-        f"\\newcommand{{\\ClosureSweepMax}}{{{max(speedups):.0f}}}",
-        f"\\newcommand{{\\ClosureSweepSizeMin}}{{{min(sizes)}}}",
-        f"\\newcommand{{\\ClosureSweepSizeMax}}{{{max(sizes)}}}",
-        f"\\newcommand{{\\ClosureSweepDrawsPerCell}}{{"
+        "% Auto-generated closure seed-sweep macros"
+        + ("" if prefix == "Closure" else f" ({prefix})")
+        + " by generate_paper_artifacts.py",
+        f"\\newcommand{{\\{prefix}SweepTrials}}{{{len(non_degenerate)}}}",
+        f"\\newcommand{{\\{prefix}SweepMedian}}{{{median:.0f}}}",
+        f"\\newcommand{{\\{prefix}SweepQOne}}{{{q1:.0f}}}",
+        f"\\newcommand{{\\{prefix}SweepQThree}}{{{q3:.0f}}}",
+        f"\\newcommand{{\\{prefix}SweepMin}}{{{min(speedups):.1f}}}",
+        f"\\newcommand{{\\{prefix}SweepMax}}{{{max(speedups):.0f}}}",
+        f"\\newcommand{{\\{prefix}SweepSizeMin}}{{{min(sizes)}}}",
+        f"\\newcommand{{\\{prefix}SweepSizeMax}}{{{max(sizes)}}}",
+        f"\\newcommand{{\\{prefix}SweepDrawsPerCell}}{{"
         f"{max(int(r['trials']) for r in summary)}}}",
     ]
     # Compare each instance's fixed seeding (the closure-family table) with the
     # random draws of the same size, so "favourable end" is checked per instance
     # rather than by setting a geometric mean against a pooled median.
-    fixed = [r for r in family_rows if r.get("experiment") == "rq1-closure"]
+    fixed = [r for r in family_rows if r.get("experiment") == family_experiment]
     if fixed:
         at_or_above = 0
         for r in fixed:
@@ -673,7 +784,7 @@ def generate_seed_sweep_artifacts(
                      if d["benchmark"] == r["benchmark"] and int(d["seed_count"]) == fixed_seed_count]
             if draws and float(r["reference_over_candidate_time"]) >= statistics.median(draws):
                 at_or_above += 1
-        macros.append(f"\\newcommand{{\\ClosureFixedAtOrAboveMedianCount}}{{{at_or_above}}}")
+        macros.append(f"\\newcommand{{\\{prefix}FixedAtOrAboveMedianCount}}{{{at_or_above}}}")
 
     lines = [
         "% Auto-generated closure seed-sweep table",
@@ -715,6 +826,18 @@ def main() -> None:
         type=Path,
         default=LOTUS_ROOT / "control-dependence-guard-results",
         help="Path to the reducibility-guarded enumeration results directory",
+    )
+    parser.add_argument(
+        "--closure-guard-results-dir",
+        type=Path,
+        default=LOTUS_ROOT / "control-dependence-closure-guard-results",
+        help="Path to the closure-baseline and guarded closure results directory",
+    )
+    parser.add_argument(
+        "--closure-cav21-family-dir",
+        type=Path,
+        default=LOTUS_ROOT / "control-dependence-closure-cav21-family",
+        help="Path to the closure-family and seed-sweep results against the CAV'21 closure",
     )
     parser.add_argument(
         "--output-dir",
@@ -800,6 +923,35 @@ def main() -> None:
         print(f"Written: {args.output_dir / 'tab_guard.tex'}")
     else:
         print(f"Note: {guard_summary} not found; skipping reducibility-guard artifacts")
+
+    cg_summary = args.closure_guard_results_dir / "summary.csv"
+    cg_raw = args.closure_guard_results_dir / "raw.csv"
+    if cg_summary.is_file() and cg_raw.is_file():
+        (args.output_dir / "closure_guard_macros.tex").write_text(
+            generate_closure_guard_macros(read_summary_csv(cg_summary), read_summary_csv(cg_raw))
+        )
+        print(f"Written: {args.output_dir / 'closure_guard_macros.tex'}")
+    else:
+        print(f"Note: {cg_summary} not found; skipping closure-guard artifacts")
+
+    cav_family = args.closure_cav21_family_dir / "summary.csv"
+    cav_sweep = args.closure_cav21_family_dir / "closure_seed_sweep.csv"
+    cav_sweep_raw = args.closure_cav21_family_dir / "closure_seed_sweep_raw.csv"
+    if cav_family.is_file() and cav_sweep.is_file() and cav_sweep_raw.is_file():
+        family_rows = read_summary_csv(cav_family)
+        cf_macros, cf_table = generate_closure_cav21_family_artifacts(family_rows)
+        sw_macros, sw_table = generate_seed_sweep_artifacts(
+            read_summary_csv(cav_sweep), read_summary_csv(cav_sweep_raw),
+            family_rows, prefix="ClosureCav", family_experiment="rq1-closure-cav21",
+        )
+        (args.output_dir / "closure_cav21_family_macros.tex").write_text(cf_macros + sw_macros)
+        print(f"Written: {args.output_dir / 'closure_cav21_family_macros.tex'}")
+        (args.output_dir / "tab_closure_cav21_family.tex").write_text(cf_table)
+        print(f"Written: {args.output_dir / 'tab_closure_cav21_family.tex'}")
+        (args.output_dir / "tab_closure_cav21_sweep.tex").write_text(sw_table)
+        print(f"Written: {args.output_dir / 'tab_closure_cav21_sweep.tex'}")
+    else:
+        print(f"Note: {cav_family} not found; skipping CAV'21 closure-family artifacts")
 
 
 
