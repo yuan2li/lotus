@@ -1097,4 +1097,68 @@ TEST(ControlDependenceTest, LibraryReducibilityGuardMatchesReference) {
   EXPECT_GT(unguardedWithDOD, 0u);
 }
 
+// Chalupa et al.'s relation closure and the biclique closure implement the
+// same definition, so they agree on every graph and every seed, reachable or
+// not. Where the reducibility guard holds, dropping the DOD part of either
+// closure must not change the answer.
+TEST(ControlDependenceTest, BaselineAndCompactClosureAgreeWithAndWithoutGuard) {
+  constexpr unsigned nodeCount = 4;
+  constexpr unsigned graphCount = 1u << (nodeCount * nodeCount);
+  unsigned graphsWithOrderRelation = 0;
+  unsigned guardedGraphs = 0;
+  unsigned comparisons = 0;
+
+  for (unsigned mask = 0; mask < graphCount; ++mask) {
+    lotus::cd::detail::Graph graph;
+    std::vector<lotus::cd::detail::GraphNode *> nodes;
+    for (unsigned index = 0; index < nodeCount; ++index)
+      nodes.push_back(&graph.createNode());
+    for (unsigned source = 0; source < nodeCount; ++source)
+      for (unsigned target = 0; target < nodeCount; ++target)
+        if (mask & (1u << (source * nodeCount + target)))
+          graph.addEdge(*nodes[source], *nodes[target]);
+
+    auto inevitability = lotus::cd::detail::computeInevitability(graph);
+    auto ntscd = lotus::cd::detail::computeCompactNTSCD(graph, inevitability);
+    auto bicliques = lotus::cd::detail::computeCompactDOD(graph, inevitability);
+    graphsWithOrderRelation += !bicliques.empty();
+    bool guard = lotus::cd::detail::isDODEmptyByReducibility(graph, *nodes[0]);
+    guardedGraphs += guard;
+
+    for (unsigned seedMask = 0; seedMask < (1u << nodeCount); ++seedMask) {
+      lotus::cd::detail::NodeSet seed;
+      seed.insert(nodes[0]);
+      for (unsigned index = 1; index < nodeCount; ++index)
+        if (seedMask & (1u << index))
+          seed.insert(nodes[index]);
+
+      auto full = closureIDs(lotus::cd::detail::computeCompactDependencyClosure(
+          graph, seed, ntscd, bicliques));
+      ASSERT_EQ(closureIDs(lotus::cd::detail::computeBaselineDependencyClosure(
+                    graph, seed)),
+                full)
+          << "graph mask " << mask << ", seed mask " << seedMask;
+      if (guard) {
+        ASSERT_EQ(
+            closureIDs(lotus::cd::detail::computeBaselineDependencyClosure(
+                graph, seed, /*includeDOD=*/false)),
+            full)
+            << "guarded graph mask " << mask << ", seed mask " << seedMask;
+        ASSERT_EQ(closureIDs(lotus::cd::detail::computeCompactDependencyClosure(
+                      graph, seed, ntscd, {})),
+                  full)
+            << "guarded graph mask " << mask << ", seed mask " << seedMask;
+      }
+      ++comparisons;
+    }
+  }
+
+  std::cout << "[ SWEEP    ] " << graphCount << " graphs, "
+            << graphsWithOrderRelation << " with a non-empty order relation, "
+            << guardedGraphs << " guarded, " << comparisons
+            << " closure comparisons\n";
+  EXPECT_GT(graphsWithOrderRelation, 0u);
+  EXPECT_GT(guardedGraphs, 0u);
+}
+
 } // namespace
