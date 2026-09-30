@@ -4,8 +4,8 @@
 Reads summary.csv, raw.csv, and metadata.json from evaluation runs, computes
 geometric means, quantiles, and paired statistics, and automatically generates:
 1. paper_macros.tex: LaTeX macro definitions for abstract/intro/eval placeholders
-2. fig_rq1_results.tikz: Real-data TikZ scatter & bar plots (Figure 3)
-3. fig_rq1_closure.tikz: Real-data TikZ closure scatter plot (Figure 4)
+2. fig_rq1_results.tikz: Real-data three-panel TikZ figure (enumeration and
+   closure time scatters, K/C compression bars)
 """
 
 from __future__ import annotations
@@ -228,35 +228,60 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
     return "\n".join(macros) + "\n"
 
 
-def generate_figures_tikz(summary_rows: List[Dict[str, Any]]) -> tuple[str, str]:
-    """Generate TikZ code for Figure 3 and Figure 4 with real data coordinates."""
+def _scatter_panel(rows: List[Dict[str, Any]], min_floor: float, max_floor: float) -> tuple[str, str]:
+    """Return (grid-and-ticks, points) TikZ lines for one log-log time scatter.
+
+    Coordinates map log10(ms) onto [0.3, 2.5].  Gridlines and tick labels are
+    placed at the decades this mapping actually hits, so they stay truthful
+    when a rerun changes the data range.
+    """
+    values = [float(r[k]) / 1e6 for r in rows
+              for k in ("reference_median_ns", "candidate_median_ns") if float(r[k]) > 0]
+    lo = min(min(values), min_floor)
+    hi = max(max(values), max_floor)
+    log_lo = math.log10(lo)
+    span = max(math.log10(hi) - log_lo, 1.0)
+
+    def to_coord(val_ms: float) -> float:
+        return (math.log10(max(val_ms, lo)) - log_lo) / span * 2.2 + 0.3
+
+    axes = []
+    # Every second decade keeps the tiny labels apart on a 2.2-unit axis.
+    for exp in range(math.ceil(log_lo), math.floor(math.log10(hi)) + 1):
+        if exp % 2:
+            continue
+        c = to_coord(10.0 ** exp)
+        axes.append(f"    \\draw[help lines, gray!20, dotted] ({c:.2f}, 0) -- ({c:.2f}, 2.6);")
+        axes.append(f"    \\draw[help lines, gray!20, dotted] (0, {c:.2f}) -- (2.6, {c:.2f});")
+    axes.append("    \\draw[->] (0,0) -- (3.2,0);")
+    axes.append("    \\draw[->] (0,0) -- (0,2.8);")
+    for exp in range(math.ceil(log_lo), math.floor(math.log10(hi)) + 1):
+        if exp % 2:
+            continue
+        c = to_coord(10.0 ** exp)
+        axes.append(f"    \\draw ({c:.2f}, 0) -- ({c:.2f}, -0.06) node[below,font=\\tiny] {{$10^{{{exp}}}$}};")
+        axes.append(f"    \\draw (0, {c:.2f}) -- (-0.06, {c:.2f}) node[left,font=\\tiny] {{$10^{{{exp}}}$}};")
+    axes.append("    \\draw[dashed,gray] (0.3,0.3) -- (2.6,2.6);")
+
+    points = []
+    for r in rows:
+        cx = to_coord(float(r["reference_median_ns"]) / 1e6)
+        cy = to_coord(float(r["candidate_median_ns"]) / 1e6)
+        points.append(f"    \\fill[blue!70!black] ({cx:.2f},{cy:.2f}) circle (1.5pt);")
+    return chr(10).join(axes), chr(10).join(points)
+
+
+def generate_figures_tikz(summary_rows: List[Dict[str, Any]]) -> str:
+    """Generate the three-panel TikZ figure (enumeration, closure, K/C) with real data."""
     spec_enum = [r for r in summary_rows if r.get("experiment") == "rq1-enumeration" and is_real_world(r)]
     spec_closure = [r for r in summary_rows if r.get("experiment") == "rq1-closure" and is_real_world(r)]
     all_enum = [r for r in summary_rows if r.get("experiment") == "rq1-enumeration"]
 
-    # Figure 5(a): Scatter plot of Enum time (log scale)
-    all_enum_ref = [float(r["reference_median_ns"]) / 1e6 for r in spec_enum if float(r["reference_median_ns"]) > 0]
-    all_enum_cand = [float(r["candidate_median_ns"]) / 1e6 for r in spec_enum if float(r["candidate_median_ns"]) > 0]
+    # Panels (a) and (b): end-to-end time scatters on log scales
+    enum_axes, enum_points = _scatter_panel(spec_enum, 0.01, 100.0)
+    closure_axes, closure_points = _scatter_panel(spec_closure, 0.01, 300.0)
 
-    min_val = min(min(all_enum_ref), min(all_enum_cand), 0.01)
-    max_val = max(max(all_enum_ref), max(all_enum_cand), 100.0)
-    log_min = math.log10(min_val)
-    log_max = math.log10(max_val)
-    log_span = max(log_max - log_min, 1.0)
-
-    def to_coord(val_ms: float) -> float:
-        l = math.log10(max(val_ms, min_val))
-        return (l - log_min) / log_span * 2.2 + 0.3
-
-    enum_points = []
-    for r in spec_enum:
-        ref_ms = float(r["reference_median_ns"]) / 1e6
-        cand_ms = float(r["candidate_median_ns"]) / 1e6
-        cx = to_coord(ref_ms)
-        cy = to_coord(cand_ms)
-        enum_points.append(f"    \\fill[blue!70!black] ({cx:.2f},{cy:.2f}) circle (1.5pt);")
-
-    # Figure 5(b): Bar plot of K/C ratio across instances with non-empty order relations
+    # Panel (c): Bar plot of K/C ratio across instances with non-empty order relations
     compression_items = []
     for r in all_enum:
         k = float(r.get("candidate_dod_pairs", 0))
@@ -289,19 +314,30 @@ def generate_figures_tikz(summary_rows: List[Dict[str, Any]]) -> tuple[str, str]
 
     bar_nodes_str = chr(10).join(bar_nodes)
 
-    fig3_tikz = f"""% Auto-generated Figure 5 TikZ code from real evaluation data
+    return f"""% Auto-generated three-panel TikZ figure from real evaluation data
 \\begin{{tikzpicture}}[font=\\scriptsize,>=Latex]
+  % Panel (a): DOD enumeration
   \\begin{{scope}}
-    \\draw[->] (0,0) -- (3.2,0);
-    \\draw[->] (0,0) -- (0,2.8);
-    \\draw[dashed,gray] (0.3,0.3) -- (2.6,2.6);
-{chr(10).join(enum_points)}
+{enum_axes}
+{enum_points}
     \\node[gray!80!black,font=\\scriptsize\\bfseries] at (1.1,2.2) {{\\EnumSpeedupGeomean$\\times$ geomean}};
-    \\node[font=\\scriptsize] at (1.55,-0.45) {{SOTA-Enumerate time (ms)}};
-    \\node[font=\\scriptsize,rotate=90] at (-0.45,1.4) {{Full-Enumerate time (ms)}};
-    \\node at (1.55,-1.00) {{(a) enumeration-time scatter}};
+    \\node[font=\\scriptsize] at (1.55,-0.50) {{SOTA-Enumerate (ms)}};
+    \\node[font=\\scriptsize,rotate=90] at (-0.80,1.4) {{Full-Enumerate (ms)}};
+    \\node at (1.55,-1.05) {{(a) DOD enumeration}};
   \\end{{scope}}
-  \\begin{{scope}}[xshift=4.6cm]
+
+  % Panel (b): Rooted strong control closure
+  \\begin{{scope}}[xshift=4.5cm]
+{closure_axes}
+{closure_points}
+    \\node[gray!80!black,font=\\scriptsize\\bfseries] at (1.1,2.2) {{\\ClosureSpeedupGeomean$\\times$ geomean}};
+    \\node[font=\\scriptsize] at (1.55,-0.50) {{SOTA-Closure (ms)}};
+    \\node[font=\\scriptsize,rotate=90] at (-0.80,1.4) {{Full-Closure (ms)}};
+    \\node at (1.55,-1.05) {{(b) rooted closure}};
+  \\end{{scope}}
+
+  % Panel (c): DOD compression ratio
+  \\begin{{scope}}[xshift=9.0cm]
     \\draw[help lines, gray!25, dashed] (0, 0.42) -- (3.5, 0.42);
     \\draw[help lines, gray!25, dashed] (0, 0.84) -- (3.5, 0.84);
     \\draw[help lines, gray!25, dashed] (0, 1.26) -- (3.5, 1.26);
@@ -314,48 +350,12 @@ def generate_figures_tikz(summary_rows: List[Dict[str, Any]]) -> tuple[str, str]
     \\draw[->] (0,0) -- (0,2.8);
 {bar_nodes_str}
     \\node[gray!80!black,font=\\scriptsize\\bfseries] at (1.85,2.45) {{\\CompressionRatioMedian$\\times$ median}};
-    \\node[font=\\scriptsize] at (1.85,-0.62) {{synthetic instances ($k$)}};
-    \\node[font=\\scriptsize,rotate=90] at (-0.95,1.4) {{$K/C$ compression ratio}};
-    \\node at (1.85,-1.00) {{(b) compression ratio}};
+    \\node[font=\\scriptsize] at (1.85,-0.50) {{synthetic instances ($k$)}};
+    \\node[font=\\scriptsize,rotate=90] at (-0.85,1.4) {{$K/C$ compression ratio}};
+    \\node at (1.85,-1.05) {{(c) compression ratio}};
   \\end{{scope}}
 \\end{{tikzpicture}}
 """
-
-    # Figure 4: Closure time scatter plot
-    all_cls_ref = [float(r["reference_median_ns"]) / 1e6 for r in spec_closure if float(r["reference_median_ns"]) > 0]
-    all_cls_cand = [float(r["candidate_median_ns"]) / 1e6 for r in spec_closure if float(r["candidate_median_ns"]) > 0]
-    c_min = min(min(all_cls_ref), min(all_cls_cand), 0.01)
-    c_max = max(max(all_cls_ref), max(all_cls_cand), 300.0)
-    c_log_min = math.log10(c_min)
-    c_log_max = math.log10(c_max)
-    c_span = max(c_log_max - c_log_min, 1.0)
-
-    def to_cls_coord(val_ms: float) -> float:
-        l = math.log10(max(val_ms, c_min))
-        return (l - c_log_min) / c_span * 2.2 + 0.3
-
-    closure_points = []
-    for r in spec_closure:
-        ref_ms = float(r["reference_median_ns"]) / 1e6
-        cand_ms = float(r["candidate_median_ns"]) / 1e6
-        cx = to_cls_coord(ref_ms)
-        cy = to_cls_coord(cand_ms)
-        closure_points.append(f"    \\fill[blue!70!black] ({cx:.2f},{cy:.2f}) circle (1.5pt);")
-
-    fig4_tikz = f"""% Auto-generated Figure 4 TikZ code from real evaluation data
-\\begin{{tikzpicture}}[font=\\scriptsize,>=Latex]
-  \\begin{{scope}}
-    \\draw[->] (0,0) -- (3.2,0);
-    \\draw[->] (0,0) -- (0,2.8);
-    \\draw[dashed,gray] (0.3,0.3) -- (2.6,2.6);
-{chr(10).join(closure_points)}
-    \\node[gray!80!black,font=\\scriptsize\\bfseries] at (1.1,2.2) {{\\ClosureSpeedupGeomean$\\times$ geomean}};
-    \\node[font=\\scriptsize] at (1.6,-0.45) {{SOTA-Closure time (ms)}};
-    \\node[font=\\scriptsize,rotate=90] at (-0.45,1.4) {{Full-Closure time (ms)}};
-  \\end{{scope}}
-\\end{{tikzpicture}}
-"""
-    return fig3_tikz, fig4_tikz
 
 
 LOTUS_ROOT = Path(__file__).resolve().parents[2]
@@ -741,11 +741,8 @@ def main() -> None:
     (args.output_dir / "paper_macros.tex").write_text(macros_code)
     print(f"Written: {args.output_dir / 'paper_macros.tex'}")
 
-    fig3_tikz, fig4_tikz = generate_figures_tikz(summary_rows)
-    (args.output_dir / "fig_rq1_results.tikz").write_text(fig3_tikz)
+    (args.output_dir / "fig_rq1_results.tikz").write_text(generate_figures_tikz(summary_rows))
     print(f"Written: {args.output_dir / 'fig_rq1_results.tikz'}")
-    (args.output_dir / "fig_rq1_closure.tikz").write_text(fig4_tikz)
-    print(f"Written: {args.output_dir / 'fig_rq1_closure.tikz'}")
 
     closure_summary = args.closure_results_dir / "summary.csv"
     if closure_summary.is_file():
