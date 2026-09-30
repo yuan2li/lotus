@@ -10,6 +10,7 @@
 #include "llvm/ADT/SparseBitVector.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <deque>
 #include <functional>
@@ -112,6 +113,68 @@ public:
       if (!colored.graph.empty())
         enumerateDOD(colored, predicate, callback);
     }
+  }
+
+  NodeSet closure(Graph &graph, const NodeSet &seed, bool includeDOD) {
+    AllMaxPathResult allPaths = computeAllMaxPaths(graph);
+
+    // Materialize both relations explicitly, as the prior closure does:
+    // NTSCD as edges node -> decision, DOD as hyperedges {a, b} -> decision.
+    DependenceMap ntscd;
+    std::vector<std::array<GraphNode *, 3>> triples;
+    for (GraphNode *predicate : graph.predicates()) {
+      // Multiway decisions: node depends on predicate when it is inevitable
+      // from some successor but not from all of them.
+      const auto &succs = predicate->successors();
+      for (GraphNode *node : graph.nodes()) {
+        size_t hits = 0;
+        for (GraphNode *succ : succs)
+          hits += contains(allPaths.at(succ), node);
+        if (hits != 0 && hits != succs.size())
+          ntscd[node].insert(predicate);
+      }
+      if (!includeDOD || succs.size() != 2)
+        continue;
+      ColoredAP colored = createColoredAP(allPaths, graph, predicate);
+      if (!colored.graph.empty())
+        enumerateDOD(colored, predicate,
+                     [&](GraphNode *p, GraphNode *a, GraphNode *b) {
+                       triples.push_back({p, a, b});
+                     });
+    }
+
+    // Backward reachability: a decision joins through an NTSCD edge from any
+    // member, or through a DOD hyperedge once both endpoints are members.
+    std::unordered_map<GraphNode *, std::vector<size_t>> byEndpoint;
+    for (size_t i = 0; i < triples.size(); ++i) {
+      byEndpoint[triples[i][1]].push_back(i);
+      if (triples[i][2] != triples[i][1])
+        byEndpoint[triples[i][2]].push_back(i);
+    }
+    NodeSet result = seed;
+    std::vector<GraphNode *> worklist(seed.begin(), seed.end());
+    auto add = [&](GraphNode *node) {
+      if (result.insert(node).second)
+        worklist.push_back(node);
+    };
+    while (!worklist.empty()) {
+      GraphNode *node = worklist.back();
+      worklist.pop_back();
+      auto edges = ntscd.find(node);
+      if (edges != ntscd.end())
+        for (GraphNode *predicate : edges->second)
+          add(predicate);
+      auto hyper = byEndpoint.find(node);
+      if (hyper == byEndpoint.end())
+        continue;
+      for (size_t i : hyper->second) {
+        GraphNode *other =
+            triples[i][1] == node ? triples[i][2] : triples[i][1];
+        if (result.count(other))
+          add(triples[i][0]);
+      }
+    }
+    return result;
   }
 
   size_t preprocess(Graph &graph) {
@@ -419,6 +482,11 @@ DependenceResult computeDODNTSCD(Graph &graph) {
 
 size_t preprocessBaselineDOD(Graph &graph) {
   return DODComputer().preprocess(graph);
+}
+
+NodeSet computeBaselineDependencyClosure(Graph &graph, const NodeSet &seed,
+                                         bool includeDOD) {
+  return DODComputer().closure(graph, seed, includeDOD);
 }
 
 void forEachBaselineDODPair(Graph &graph,
