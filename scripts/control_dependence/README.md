@@ -45,6 +45,10 @@ python3 scripts/control_dependence/evaluate_control_dependence.py \
   --repeat 5 --warmup 1 --seed-count 4 --output-dir control-dependence-closure-cav21-family
 python3 scripts/control_dependence/sweep_closure_seeds.py --sizes 1 2 4 8 16 32 64 --trials 10 \
   --sota-algorithm ntscd-dod-closure --output-dir control-dependence-closure-cav21-family
+
+# 6. Regenerate the artifacts with the CAV'21 closure behind the \ClosureSpeedup*
+#    macros and figure panel (b), instead of Danicic et al.'s strong closure
+python3 scripts/control_dependence/generate_paper_artifacts.py --closure-baseline cav21
 ```
 
 ## Running the control-dependence unit tests

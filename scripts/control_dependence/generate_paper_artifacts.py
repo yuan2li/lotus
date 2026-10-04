@@ -807,6 +807,34 @@ def generate_seed_sweep_artifacts(
     return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
 
 
+def with_cav21_closure(summary_rows: List[Dict[str, Any]], results_dir: Path) -> List[Dict[str, Any]]:
+    """Replace the real-subject rq1-closure rows by rq1-closure-cav21 rows of results_dir.
+
+    The replacement rows are relabelled rq1-closure, so every consumer of the
+    real-subject closure comparison (macros and figure panel (b)) switches
+    baseline without further changes.  Both runs must cover the same real
+    subjects; synthetic rows are left alone, since no consumer reads them.
+    """
+    summary_file = results_dir / "summary.csv"
+    if not summary_file.is_file():
+        print(f"Error: {summary_file} not found; needed for --closure-baseline=cav21.",
+              file=sys.stderr)
+        sys.exit(1)
+    cav = [dict(r, experiment="rq1-closure") for r in read_summary_csv(summary_file)
+           if r.get("experiment") == "rq1-closure-cav21" and is_real_world(r)]
+
+    def replaced(r: Dict[str, Any]) -> bool:
+        return r.get("experiment") == "rq1-closure" and is_real_world(r)
+
+    old = {r["input"] for r in summary_rows if replaced(r)}
+    new = {r["input"] for r in cav}
+    if old != new:
+        print(f"Error: rq1-closure-cav21 in {summary_file} covers {len(new)} real subjects, "
+              f"rq1-closure covers {len(old)}; they must match.", file=sys.stderr)
+        sys.exit(1)
+    return [r for r in summary_rows if not replaced(r)] + cav
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -840,6 +868,15 @@ def main() -> None:
         help="Path to the closure-family and seed-sweep results against the CAV'21 closure",
     )
     parser.add_argument(
+        "--closure-baseline",
+        choices=("danicic", "cav21"),
+        default="danicic",
+        help="Prior closure behind the \\ClosureSpeedup* macros and figure panel (b): "
+             "Danicic et al.'s strong control closure (rq1-closure in --results-dir) or "
+             "Chalupa et al.'s NTSCD and DOD closure (rq1-closure-cav21 in "
+             "--closure-guard-results-dir)",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=WORKSPACE_ROOT / "paper-control-dep" / "sections" / "generated",
@@ -853,6 +890,8 @@ def main() -> None:
         sys.exit(1)
 
     summary_rows = read_summary_csv(summary_file)
+    if args.closure_baseline == "cav21":
+        summary_rows = with_cav21_closure(summary_rows, args.closure_guard_results_dir)
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     macros_code = generate_paper_macros(summary_rows)
