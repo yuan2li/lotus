@@ -84,6 +84,15 @@ cl::opt<bool> ReducibilityGuard(
         "separately, skip only the DOD part. The check is timed in "
         "analysis_ns and reported as guard_ns"),
     cl::init(false));
+cl::opt<bool> SharedInevitability(
+    "shared-inevitability",
+    cl::desc(
+        "For dod --visit-pairs and ntscd-dod-closure, compute the compact "
+        "inevitability matrix and run the baseline on a copy of it instead "
+        "of its own coloring pass. The matrix is timed in "
+        "inevitability_ns; the copy is reported as convert_ns and excluded "
+        "from analysis_ns"),
+    cl::init(false));
 cl::opt<bool> LowerSwitch(
     "lower-switch",
     cl::desc("Lower multiway switches to chains of binary branches before "
@@ -274,6 +283,7 @@ struct Record {
       closureNS{};
   uint64_t peakRSSKB{}, resultFingerprint{};
   uint64_t guardNS{};
+  uint64_t convertNS{};
   bool guardSkipped{};
 };
 
@@ -329,6 +339,18 @@ Record run(Function &function, FunctionGraph &fg, Algorithm algorithm) {
     }
   }
 
+  // Shared preprocessing: the baseline starts from the compact matrix, and the
+  // representation change is timed separately so it is charged to neither side.
+  auto sharedPaths = [&]() {
+    auto start = Clock::now();
+    Inevitability inevitable = computeInevitability(fg.graph);
+    r.inevitableNS = elapsed(start);
+    start = Clock::now();
+    BaselinePathSets paths = toBaselinePathSets(fg.graph, inevitable);
+    r.convertNS = elapsed(start);
+    return paths;
+  };
+
   switch (algorithm) {
   case Algorithm::NTSCD2:
     deps = computeNTSCD2(fg.graph);
@@ -344,14 +366,21 @@ Record run(Function &function, FunctionGraph &fg, Algorithm algorithm) {
   }
   case Algorithm::DOD:
     if (VisitPairs) {
-      auto start = Clock::now();
-      forEachBaselineDODPair(
-          fg.graph,
-          [&](GraphNode *decision, GraphNode *first, GraphNode *second) {
-            ++r.pairs;
-            r.resultFingerprint += pairFingerprint(decision, first, second);
-          });
-      r.visitNS = elapsed(start);
+      auto visit = [&](GraphNode *decision, GraphNode *first,
+                       GraphNode *second) {
+        ++r.pairs;
+        r.resultFingerprint += pairFingerprint(decision, first, second);
+      };
+      if (SharedInevitability) {
+        BaselinePathSets paths = sharedPaths();
+        auto start = Clock::now();
+        forEachBaselineDODPair(fg.graph, paths, visit);
+        r.visitNS = elapsed(start);
+      } else {
+        auto start = Clock::now();
+        forEachBaselineDODPair(fg.graph, visit);
+        r.visitNS = elapsed(start);
+      }
     } else {
       r.bicliques = preprocessBaselineDOD(fg.graph);
     }
@@ -419,10 +448,18 @@ Record run(Function &function, FunctionGraph &fg, Algorithm algorithm) {
   }
   case Algorithm::NTSCDDODClosure: {
     // Relations and closure are one pass here, so all time is closure_ns.
-    auto start = Clock::now();
-    closure =
-        computeBaselineDependencyClosure(fg.graph, fg.seed(), !r.guardSkipped);
-    r.closureNS = elapsed(start);
+    if (SharedInevitability) {
+      BaselinePathSets paths = sharedPaths();
+      auto start = Clock::now();
+      closure = computeBaselineDependencyClosure(fg.graph, fg.seed(), paths,
+                                                 !r.guardSkipped);
+      r.closureNS = elapsed(start);
+    } else {
+      auto start = Clock::now();
+      closure = computeBaselineDependencyClosure(fg.graph, fg.seed(),
+                                                 !r.guardSkipped);
+      r.closureNS = elapsed(start);
+    }
     break;
   }
   case Algorithm::CompactClosure: {
@@ -463,7 +500,7 @@ Record run(Function &function, FunctionGraph &fg, Algorithm algorithm) {
   }
   }
 
-  r.totalNS = elapsed(totalStart);
+  r.totalNS = elapsed(totalStart) - r.convertNS;
   r.dependencies = relationSize(deps);
   if (!bicliques.empty()) {
     r.bicliques = bicliques.size();
@@ -500,14 +537,14 @@ void printText(const std::vector<Record> &records) {
            << " peak_rss_kb=" << r.peakRSSKB
            << " result_fingerprint=" << r.resultFingerprint
            << " guard_ns=" << r.guardNS << " guard_skipped=" << r.guardSkipped
-           << "\n";
+           << " convert_ns=" << r.convertNS << "\n";
 }
 
 void printCSV(const std::vector<Record> &records) {
   outs() << "function,algorithm,nodes,edges,decisions,dependencies,bicliques,"
             "incidences,dod_pairs,closure_size,analysis_ns,inevitability_ns,"
             "ntscd_ns,dod_ns,pair_visit_ns,closure_ns,peak_rss_kb,"
-            "result_fingerprint,guard_ns,guard_skipped\n";
+            "result_fingerprint,guard_ns,guard_skipped,convert_ns\n";
   for (const Record &r : records)
     outs() << '"' << r.function << "\"," << r.algorithm << ',' << r.nodes << ','
            << r.edges << ',' << r.decisions << ',' << r.dependencies << ','
@@ -515,7 +552,8 @@ void printCSV(const std::vector<Record> &records) {
            << r.closureSize << ',' << r.totalNS << ',' << r.inevitableNS << ','
            << r.ntscdNS << ',' << r.dodNS << ',' << r.visitNS << ','
            << r.closureNS << ',' << r.peakRSSKB << ',' << r.resultFingerprint
-           << ',' << r.guardNS << ',' << r.guardSkipped << '\n';
+           << ',' << r.guardNS << ',' << r.guardSkipped << ',' << r.convertNS
+           << '\n';
 }
 
 void printJSON(const std::vector<Record> &records) {
@@ -542,6 +580,7 @@ void printJSON(const std::vector<Record> &records) {
     o["result_fingerprint"] = int64_t(r.resultFingerprint);
     o["guard_ns"] = int64_t(r.guardNS);
     o["guard_skipped"] = r.guardSkipped;
+    o["convert_ns"] = int64_t(r.convertNS);
     array.push_back(std::move(o));
   }
   outs() << formatv("{0:2}\n", json::Value(std::move(array)));
@@ -585,6 +624,10 @@ int main(int argc, char **argv) {
   if (ReducibilityGuard && !acceptsGuard(algorithm))
     report_fatal_error("--reducibility-guard is valid only for DOD algorithms "
                        "and closures that compute DOD separately");
+  if (SharedInevitability && !((algorithm == Algorithm::DOD && VisitPairs) ||
+                               algorithm == Algorithm::NTSCDDODClosure))
+    report_fatal_error("--shared-inevitability is valid only for dod "
+                       "--visit-pairs and ntscd-dod-closure");
   if ((!SeedIndices.empty() || SeedCount > 0 || SeedRng > 0) && !isClosure(algorithm))
     report_fatal_error("--seed-index is valid only for closure algorithms");
 
