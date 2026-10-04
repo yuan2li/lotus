@@ -31,6 +31,12 @@ Paper-to-driver map
     the entry is reducible and no unreachable decision reaches a cycle; its
     cost is included in ``analysis_ns``. These answer "why not check
     reducibility first?" and are not run by default.
+``rq1-enumeration-shared`` / ``rq1-closure-cav21-shared`` (and ``-guarded-both``)
+    The SOTA side runs with ``--shared-inevitability`` on a copy of the compact
+    inevitability matrix, and both sides are compared on
+    ``post_inevitability_ns``. This separates the data-structure difference in
+    the shared phase from what each algorithm does afterwards. Not run by
+    default.
 ``rq1-closure-cav21`` and its ``-guarded-sota`` / ``-guarded-both`` variants
     Full-Closure against Chalupa et al.'s NTSCD and DOD closure (CAV'21,
     Definition 10), which materializes both relations and closes the seed by
@@ -95,6 +101,9 @@ class Experiment:
     # Extra driver flags for one side only, such as --reducibility-guard.
     reference_args: tuple[str, ...] = ()
     candidate_args: tuple[str, ...] = ()
+    # Timing field compared across the pair. post_inevitability_ns is
+    # analysis_ns minus inevitability_ns: the work after shared preprocessing.
+    metric: str = "analysis_ns"
 
     def __post_init__(self) -> None:
         # Samples are keyed by algorithm name, so the two sides must differ.
@@ -161,6 +170,53 @@ EXPERIMENTS: dict[str, Experiment] = {
         result_field="dod_pairs",
         reference_args=("--reducibility-guard",),
         candidate_args=("--reducibility-guard",),
+    ),
+    # Shared preprocessing: the SOTA side runs on a copy of the compact
+    # inevitability matrix, and both sides are timed after that matrix, so the
+    # ratio isolates what each algorithm does with the same inevitability.
+    "rq1-enumeration-shared": Experiment(
+        "RQ1",
+        "dod",
+        "dod-compact",
+        "SOTA-Enumerate (shared)",
+        "Full-Enumerate",
+        visit_pairs=True,
+        result_field="dod_pairs",
+        reference_args=("--shared-inevitability",),
+        metric="post_inevitability_ns",
+    ),
+    "rq1-enumeration-shared-guarded-both": Experiment(
+        "RQ1",
+        "dod",
+        "dod-compact",
+        "SOTA-Enumerate+Guard (shared)",
+        "Full-Enumerate+Guard",
+        visit_pairs=True,
+        result_field="dod_pairs",
+        reference_args=("--shared-inevitability", "--reducibility-guard"),
+        candidate_args=("--reducibility-guard",),
+        metric="post_inevitability_ns",
+    ),
+    "rq1-closure-cav21-shared": Experiment(
+        "RQ1",
+        "ntscd-dod-closure",
+        "compact-closure",
+        "SOTA-Closure-CAV21 (shared)",
+        "Full-Closure",
+        result_field="closure_size",
+        reference_args=("--shared-inevitability",),
+        metric="post_inevitability_ns",
+    ),
+    "rq1-closure-cav21-shared-guarded-both": Experiment(
+        "RQ1",
+        "ntscd-dod-closure",
+        "compact-closure",
+        "SOTA-Closure-CAV21+Guard (shared)",
+        "Full-Closure+Guard",
+        result_field="closure_size",
+        reference_args=("--shared-inevitability", "--reducibility-guard"),
+        candidate_args=("--reducibility-guard",),
+        metric="post_inevitability_ns",
     ),
     # Closure against the relation-based prior closure, which, unlike
     # strong-closure, computes DOD separately and so admits the same guard.
@@ -358,6 +414,11 @@ def aggregate_driver_rows(rows: list[dict[str, str]]) -> dict[str, int | str]:
     # Reducibility-guard columns; absent from drivers that predate the guard.
     result["guard_ns"] = sum(int(row.get("guard_ns", 0)) for row in rows)
     result["guard_skipped"] = sum(int(row.get("guard_skipped", 0)) for row in rows)
+    # Representation copy under --shared-inevitability; excluded from analysis_ns.
+    result["convert_ns"] = sum(int(row.get("convert_ns", 0)) for row in rows)
+    result["post_inevitability_ns"] = (
+        int(result["analysis_ns"]) - int(result["inevitability_ns"])
+    )
     result["result_fingerprint"] = sum(
         int(row["result_fingerprint"]) for row in rows
     ) & ((1 << 64) - 1)
@@ -652,8 +713,8 @@ def main() -> int:
             ]
             if not reference or not candidate:
                 continue
-            reference_stats = summarize_samples(reference, "analysis_ns")
-            candidate_stats = summarize_samples(candidate, "analysis_ns")
+            reference_stats = summarize_samples(reference, experiment.metric)
+            candidate_stats = summarize_samples(candidate, experiment.metric)
             reference_memory = summarize_samples(reference, "peak_rss_kb")
             candidate_memory = summarize_samples(candidate, "peak_rss_kb")
             reference_output = {output_count(row, experiment) for row in reference}
@@ -711,6 +772,7 @@ def main() -> int:
                     "reference_fingerprint": next(iter(reference_fingerprint)),
                     "candidate_fingerprint": next(iter(candidate_fingerprint)),
                     "outputs_match": outputs_match,
+                    "metric": experiment.metric,
                     "reference_median_ns": reference_stats["median"],
                     "candidate_median_ns": candidate_stats["median"],
                     "reference_over_candidate_time": reference_over_candidate,
