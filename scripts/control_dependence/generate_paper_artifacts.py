@@ -807,6 +807,76 @@ def generate_seed_sweep_artifacts(
     return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
 
 
+def generate_shared_inevitability_macros(
+    summary_rows: List[Dict[str, Any]], raw_rows: List[Dict[str, Any]]
+) -> str:
+    """Macros separating shared preprocessing from what follows it.
+
+    In the ``-shared`` experiments the SOTA side runs on a copy of the compact
+    inevitability matrix and both sides are compared after it
+    (post_inevitability_ns), so the ratio no longer contains the difference
+    between the two inevitability representations.  The unshared experiments
+    come from the same run and anchor the comparison.
+    """
+    import statistics
+
+    names = {
+        "EnumUnshared": "rq1-enumeration",
+        "EnumGuardBoth": "rq1-enumeration-guarded-both",
+        "Enum": "rq1-enumeration-shared",
+        "EnumSharedGuardBoth": "rq1-enumeration-shared-guarded-both",
+        "ClosureUnshared": "rq1-closure-cav21",
+        "ClosureGuardBoth": "rq1-closure-cav21-guarded-both",
+        "Closure": "rq1-closure-cav21-shared",
+        "ClosureSharedGuardBoth": "rq1-closure-cav21-shared-guarded-both",
+    }
+    real = {
+        e: {r["benchmark"]: r for r in summary_rows
+            if r.get("experiment") == e and is_real_world(r)}
+        for e in names.values()
+    }
+    subjects = sorted(set.intersection(*(set(v) for v in real.values())))
+
+    def speedups(experiment: str) -> List[float]:
+        return [float(real[experiment][b]["reference_over_candidate_time"]) for b in subjects]
+
+    def end_to_end(experiment: str) -> float:
+        # Both sides pay for the same compact matrix; the copy is excluded.
+        ratios = []
+        for b in subjects:
+            runs = [r for r in raw_rows if r.get("experiment") == experiment and r["benchmark"] == b]
+            ref = [int(r["analysis_ns"]) for r in runs if r["implementation"] == "reference"]
+            cand = [int(r["analysis_ns"]) for r in runs if r["implementation"] == "candidate"]
+            ratios.append(statistics.median(ref) / statistics.median(cand))
+        return geometric_mean(ratios)
+
+    macros = [
+        "% Auto-generated shared-inevitability macros by generate_paper_artifacts.py",
+        f"\\newcommand{{\\SharedSubjectCount}}{{{len(subjects)}}}",
+    ]
+    for name, experiment in names.items():
+        values = speedups(experiment)
+        macros += [
+            f"\\newcommand{{\\Shared{name}Geomean}}{{{geometric_mean(values):.2f}}}",
+            f"\\newcommand{{\\Shared{name}Min}}{{{min(values):.2f}}}",
+            f"\\newcommand{{\\Shared{name}Max}}{{{max(values):.2f}}}",
+            f"\\newcommand{{\\Shared{name}SlowerCount}}{{{sum(1 for v in values if v < 1.0)}}}",
+        ]
+    macros += [
+        f"\\newcommand{{\\SharedEnumEndToEndGeomean}}{{{end_to_end(names['Enum']):.2f}}}",
+        f"\\newcommand{{\\SharedClosureEndToEndGeomean}}{{{end_to_end(names['Closure']):.2f}}}",
+    ]
+    for name in ("Enum", "Closure"):
+        values = [float(r["reference_over_candidate_time"]) for r in summary_rows
+                  if r.get("experiment") == names[name] and not is_real_world(r)]
+        if values:
+            macros += [
+                f"\\newcommand{{\\Shared{name}SyntheticGeomean}}{{{geometric_mean(values):.2f}}}",
+                f"\\newcommand{{\\Shared{name}SyntheticMax}}{{{max(values):.2f}}}",
+            ]
+    return "\n".join(macros) + "\n"
+
+
 def with_cav21_closure(summary_rows: List[Dict[str, Any]], results_dir: Path) -> List[Dict[str, Any]]:
     """Replace the real-subject rq1-closure rows by rq1-closure-cav21 rows of results_dir.
 
@@ -866,6 +936,12 @@ def main() -> None:
         type=Path,
         default=LOTUS_ROOT / "control-dependence-closure-cav21-family",
         help="Path to the closure-family and seed-sweep results against the CAV'21 closure",
+    )
+    parser.add_argument(
+        "--shared-results-dir",
+        type=Path,
+        default=LOTUS_ROOT / "control-dependence-shared-results",
+        help="Path to the shared-inevitability results directory",
     )
     parser.add_argument(
         "--closure-baseline",
@@ -991,6 +1067,18 @@ def main() -> None:
         print(f"Written: {args.output_dir / 'tab_closure_cav21_sweep.tex'}")
     else:
         print(f"Note: {cav_family} not found; skipping CAV'21 closure-family artifacts")
+
+    shared_summary = args.shared_results_dir / "summary.csv"
+    shared_raw = args.shared_results_dir / "raw.csv"
+    if shared_summary.is_file() and shared_raw.is_file():
+        (args.output_dir / "shared_inevitability_macros.tex").write_text(
+            generate_shared_inevitability_macros(
+                read_summary_csv(shared_summary), read_summary_csv(shared_raw)
+            )
+        )
+        print(f"Written: {args.output_dir / 'shared_inevitability_macros.tex'}")
+    else:
+        print(f"Note: {shared_summary} not found; skipping shared-inevitability artifacts")
 
 
 
