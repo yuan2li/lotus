@@ -1161,4 +1161,65 @@ TEST(ControlDependenceTest, BaselineAndCompactClosureAgreeWithAndWithoutGuard) {
   EXPECT_GT(guardedGraphs, 0u);
 }
 
+// The baseline can run on the compact inevitability matrix instead of its own
+// coloring pass: the converted sets are identical, so the DOD triples and the
+// closure it returns are too.
+TEST(ControlDependenceTest, BaselineRunsUnchangedOnSharedInevitability) {
+  constexpr unsigned nodeCount = 4;
+  constexpr unsigned graphCount = 1u << (nodeCount * nodeCount);
+  using Triple = std::tuple<unsigned, unsigned, unsigned>;
+  unsigned graphsWithOrderRelation = 0;
+
+  for (unsigned mask = 0; mask < graphCount; ++mask) {
+    lotus::cd::detail::Graph graph;
+    std::vector<lotus::cd::detail::GraphNode *> nodes;
+    for (unsigned index = 0; index < nodeCount; ++index)
+      nodes.push_back(&graph.createNode());
+    for (unsigned source = 0; source < nodeCount; ++source)
+      for (unsigned target = 0; target < nodeCount; ++target)
+        if (mask & (1u << (source * nodeCount + target)))
+          graph.addEdge(*nodes[source], *nodes[target]);
+
+    auto own = lotus::cd::detail::computeBaselinePathSets(graph);
+    auto shared = lotus::cd::detail::toBaselinePathSets(
+        graph, lotus::cd::detail::computeInevitability(graph));
+    ASSERT_EQ(own.size(), shared.size()) << "graph mask " << mask;
+    for (auto *node : nodes)
+      ASSERT_TRUE(own.at(node) == shared.at(node))
+          << "graph mask " << mask << ", vertex " << node->getID();
+
+    auto triples = [&](const lotus::cd::detail::BaselinePathSets *paths) {
+      std::set<Triple> result;
+      auto collect = [&](lotus::cd::detail::GraphNode *p,
+                         lotus::cd::detail::GraphNode *a,
+                         lotus::cd::detail::GraphNode *b) {
+        result.emplace(p->getID(), a->getID(), b->getID());
+      };
+      if (paths)
+        lotus::cd::detail::forEachBaselineDODPair(graph, *paths, collect);
+      else
+        lotus::cd::detail::forEachBaselineDODPair(graph, collect);
+      return result;
+    };
+    auto expected = triples(nullptr);
+    ASSERT_EQ(triples(&shared), expected) << "graph mask " << mask;
+    graphsWithOrderRelation += !expected.empty();
+
+    for (unsigned seedMask = 0; seedMask < (1u << nodeCount); ++seedMask) {
+      lotus::cd::detail::NodeSet seed;
+      seed.insert(nodes[0]);
+      for (unsigned index = 1; index < nodeCount; ++index)
+        if (seedMask & (1u << index))
+          seed.insert(nodes[index]);
+      ASSERT_EQ(closureIDs(lotus::cd::detail::computeBaselineDependencyClosure(
+                    graph, seed, shared)),
+                closureIDs(lotus::cd::detail::computeBaselineDependencyClosure(
+                    graph, seed)))
+          << "graph mask " << mask << ", seed mask " << seedMask;
+    }
+  }
+
+  EXPECT_GT(graphsWithOrderRelation, 0u);
+}
+
 } // namespace

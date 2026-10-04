@@ -9,6 +9,8 @@
 
 #include "llvm/ADT/SparseBitVector.h"
 
+#include "Analysis/ControlDependence/CompactControlDependence.h"
+
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -44,7 +46,7 @@ private:
 };
 
 using IDSet = llvm::SparseBitVector<>;
-using AllMaxPathResult = std::map<GraphNode *, IDSet>;
+using AllMaxPathResult = BaselinePathSets;
 
 AllMaxPathResult computeAllMaxPaths(Graph &graph) {
   AllMaxPathResult result;
@@ -102,10 +104,9 @@ public:
     return {std::move(dependencies), std::move(dependents)};
   }
 
-  void enumerate(Graph &graph,
+  void enumerate(Graph &graph, const AllMaxPathResult &allPaths,
                  const std::function<void(GraphNode *, GraphNode *,
                                           GraphNode *)> &callback) {
-    AllMaxPathResult allPaths = computeAllMaxPaths(graph);
     for (GraphNode *predicate : graph.predicates()) {
       if (predicate->successors().size() != 2)
         continue;
@@ -115,9 +116,8 @@ public:
     }
   }
 
-  NodeSet closure(Graph &graph, const NodeSet &seed, bool includeDOD) {
-    AllMaxPathResult allPaths = computeAllMaxPaths(graph);
-
+  NodeSet closure(Graph &graph, const NodeSet &seed,
+                  const AllMaxPathResult &allPaths, bool includeDOD) {
     // Materialize both relations explicitly, as the prior closure does:
     // NTSCD as edges node -> decision, DOD as hyperedges {a, b} -> decision.
     DependenceMap ntscd;
@@ -486,13 +486,41 @@ size_t preprocessBaselineDOD(Graph &graph) {
 
 NodeSet computeBaselineDependencyClosure(Graph &graph, const NodeSet &seed,
                                          bool includeDOD) {
-  return DODComputer().closure(graph, seed, includeDOD);
+  return DODComputer().closure(graph, seed, computeAllMaxPaths(graph),
+                               includeDOD);
+}
+
+NodeSet computeBaselineDependencyClosure(Graph &graph, const NodeSet &seed,
+                                         const BaselinePathSets &paths,
+                                         bool includeDOD) {
+  return DODComputer().closure(graph, seed, paths, includeDOD);
+}
+
+BaselinePathSets computeBaselinePathSets(Graph &graph) {
+  return computeAllMaxPaths(graph);
+}
+
+BaselinePathSets toBaselinePathSets(Graph &graph,
+                                    const Inevitability &inevitability) {
+  BaselinePathSets result;
+  for (GraphNode *node : graph.nodes()) {
+    IDSet &set = result[node];
+    for (unsigned target : inevitability.row(node).set_bits())
+      set.set(target);
+  }
+  return result;
 }
 
 void forEachBaselineDODPair(Graph &graph,
                             const std::function<void(GraphNode *, GraphNode *,
                                                      GraphNode *)> &callback) {
-  DODComputer().enumerate(graph, callback);
+  DODComputer().enumerate(graph, computeAllMaxPaths(graph), callback);
+}
+
+void forEachBaselineDODPair(Graph &graph, const BaselinePathSets &paths,
+                            const std::function<void(GraphNode *, GraphNode *,
+                                                     GraphNode *)> &callback) {
+  DODComputer().enumerate(graph, paths, callback);
 }
 
 DependenceResult computeDODRanganath(Graph &graph) {
