@@ -591,8 +591,8 @@ void printJSON(const std::vector<Record> &records) {
 void printExitStats(Module &module) {
   // Runs outside the timed paths: it reports where Algorithm 2 leaves each
   // binary decision, which explains the empty order relation on real CFGs.
-  outs() << "function,decisions,single_entry,shared_entry,decision_entry,"
-            "no_cycle,transitions,biclique\n";
+  outs() << "function,decisions,few_inevitable,single_entry,shared_entry,"
+            "decision_entry,no_cycle,transitions,biclique\n";
   for (Function &function : module) {
     if (function.isDeclaration() || function.empty())
       continue;
@@ -606,7 +606,8 @@ void printExitStats(Module &module) {
     for (GraphNode *decision : fg.graph.predicates())
       binaryDecisions += decision->successors().size() == 2;
     outs() << '"' << function.getName() << "\"," << binaryDecisions << ','
-           << stats.singleEntry << ',' << stats.sharedEntry << ','
+           << stats.fewInevitable << ',' << stats.singleEntry << ','
+           << stats.sharedEntry << ','
            << stats.decisionEntry << ',' << stats.noCycle << ','
            << stats.transitions << ',' << stats.biclique << '\n';
   }

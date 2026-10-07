@@ -4,6 +4,7 @@
 Runs the driver's ``--dod-exit-stats`` mode over the real-world subjects of an
 existing evaluation and aggregates the per-decision exit reasons:
 
+- ``few_inevitable`` |S_p| < 3, so S_p - {p} cannot hold a dependent pair;
 - ``single_entry``   the two branches share a single projection entry
                      (|B1 u B2| <= 1), so no order can differ;
 - ``shared_entry``   the branch-entry sets overlap;
@@ -34,7 +35,7 @@ from pathlib import Path
 LOTUS_ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE_ROOT = LOTUS_ROOT.parent
 
-REASONS = ["single_entry", "shared_entry", "decision_entry", "no_cycle",
+REASONS = ["few_inevitable", "single_entry", "shared_entry", "decision_entry", "no_cycle",
            "transitions", "biclique"]
 
 
