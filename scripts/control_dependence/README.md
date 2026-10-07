@@ -58,6 +58,12 @@ python3 scripts/control_dependence/evaluate_control_dependence.py \
   --experiments rq1-enumeration,rq1-enumeration-guarded-both,rq1-enumeration-shared,rq1-enumeration-shared-guarded-both,rq1-closure-cav21,rq1-closure-cav21-guarded-both,rq1-closure-cav21-shared,rq1-closure-cav21-shared-guarded-both \
   --repeat 5 --warmup 1 --timeout 300 --keep-going \
   --output-dir control-dependence-shared-results
+
+# 8. Paper artifacts with the CAV'21 closure and shared preprocessing behind the
+#    real-subject speedups and figure panels (a) and (b); also writes the
+#    combined scaling table (output sensitivity + closure family)
+python3 scripts/control_dependence/generate_paper_artifacts.py \
+  --closure-baseline cav21 --shared-inevitability
 ```
 
 ## Running the control-dependence unit tests

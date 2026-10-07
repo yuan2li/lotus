@@ -625,15 +625,24 @@ def generate_closure_guard_macros(
 def generate_exit_distribution_macros(rows: List[Dict[str, Any]]) -> str:
     """Macros describing where Algorithm 2 leaves each real binary decision.
 
-    Produced by dod_exit_distribution.py.  Every decision leaving at the first
-    test is the structural reason the order relation is empty on real CFGs.
+    Produced by dod_exit_distribution.py.  Every decision leaving at the early
+    checks is the structural reason the order relation is empty on real CFGs.
+    Early exits are those taken before SCC propagation: the inevitable-set
+    precheck and the three branch-entry tests.
     """
-    reasons = ["single_entry", "shared_entry", "decision_entry", "no_cycle",
-               "transitions", "biclique"]
+    reasons = ["few_inevitable", "single_entry", "shared_entry", "decision_entry",
+               "no_cycle", "transitions", "biclique"]
     decisions = sum(int(r["decisions"]) for r in rows)
-    counted = {reason: sum(int(r[reason]) for r in rows) for reason in reasons}
+    # Rows written before the precheck existed have no few_inevitable column.
+    counted = {reason: sum(int(r.get(reason) or 0) for r in rows) for reason in reasons}
     single_share = 100.0 * counted["single_entry"] / decisions if decisions else 0.0
+    early = sum(counted[r] for r in ("few_inevitable", "single_entry",
+                                     "shared_entry", "decision_entry"))
+    early_share = 100.0 * early / decisions if decisions else 0.0
     macros = [
+        f"\\newcommand{{\\FewInevitableExitCount}}{{{counted['few_inevitable']:,}}}",
+        f"\\newcommand{{\\EarlyExitCount}}{{{early:,}}}",
+        f"\\newcommand{{\\EarlyExitPercent}}{{{early_share:.1f}}}",
         f"\\newcommand{{\\BinaryDecisionCount}}{{{decisions:,}}}",
         f"\\newcommand{{\\SingleEntryExitPercent}}{{{single_share:.1f}}}",
         f"\\newcommand{{\\SingleEntryExitCount}}{{{counted['single_entry']:,}}}",
@@ -693,6 +702,57 @@ def generate_output_sensitivity_artifacts(raw_rows: List[Dict[str, Any]]) -> tup
         f"{int(round(max(int(r['dod_pairs']) for rows in by_k.values() for r in rows) / min(int(r['dod_pairs']) for rows in by_k.values() for r in rows)))}}}",
     ]
     return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
+
+
+def generate_scaling_combined_table(raw_rows: List[Dict[str, Any]],
+                                    family_rows: List[Dict[str, Any]],
+                                    family_experiment: str,
+                                    speedup_digits: int) -> str:
+    """The paper's combined scaling table for the Proposition 5.5 family.
+
+    Columns 4-5 repeat the output-sensitivity split (ns per enumerated triple
+    and per stored membership, from raw_rows); columns 6-9 are the fixed-seed
+    rooted closure comparison from family_experiment in family_rows.
+    """
+    import re
+    import statistics
+
+    def k_of(name: str) -> int:
+        match = re.search(r"k(\d+)", name)
+        return int(match.group(1)) if match else -1
+
+    enum: Dict[int, List[Dict[str, Any]]] = {}
+    for row in raw_rows:
+        if row.get("algorithm") == "dod-compact" and row.get("experiment") == "rq1-enumeration":
+            enum.setdefault(k_of(str(row["benchmark"])), []).append(row)
+    closure = {k_of(str(r["benchmark"])): r for r in family_rows
+               if r.get("experiment") == family_experiment}
+    lines = [
+        "% Auto-generated combined scaling table for the Proposition 5.5 family",
+        "\\begin{tabular}{@{}rrrrrrrrr@{}}",
+        "\\toprule",
+        "& & & \\multicolumn{2}{c}{DOD Extraction \\& Enum.} & "
+        "\\multicolumn{4}{c}{Rooted Strong Control Closure} \\\\",
+        "\\cmidrule(lr){4-5} \\cmidrule(lr){6-9}",
+        "$k$ & $K$ & $C$ & Enum. (ns/triple) & Const. (ns/mem.) & $|W'|$ & "
+        "SOTA (ms) & Full (ms) & Speedup \\\\",
+        "\\midrule",
+    ]
+    for k in sorted(set(enum) & set(closure)):
+        rows, c = enum[k], closure[k]
+        pairs = int(rows[0]["dod_pairs"])
+        incidences = int(rows[0]["incidences"])
+        visit = statistics.median(int(r["pair_visit_ns"]) for r in rows)
+        build = statistics.median(int(r["dod_ns"]) for r in rows)
+        lines.append(
+            f"{k} & {pairs:,} & {incidences:,} & {visit / pairs:.1f} & "
+            f"{build / incidences:.0f} & {int(c['candidate_output'])} & "
+            f"{float(c['reference_median_ns']) / 1e6:.2f} & "
+            f"{float(c['candidate_median_ns']) / 1e6:.2f} & "
+            f"{float(c['reference_over_candidate_time']):.{speedup_digits}f}$\\times$ \\\\"
+        )
+    lines += ["\\bottomrule", "\\end{tabular}"]
+    return "\n".join(lines) + "\n"
 
 
 def generate_closure_cav21_family_artifacts(rows: List[Dict[str, Any]]) -> tuple[str, str]:
@@ -807,6 +867,30 @@ def generate_seed_sweep_artifacts(
     return "\n".join(macros) + "\n", "\n".join(lines) + "\n"
 
 
+def end_to_end_speedups(raw_rows: List[Dict[str, Any]], experiment: str) -> Dict[str, Dict[str, float]]:
+    """Per-input median analysis_ns of both sides and their ratio.
+
+    In the ``-shared`` experiments both sides compute the same compact
+    inevitability matrix inside analysis_ns (the SOTA side's representation
+    copy is reported separately and excluded), so this ratio is the end-to-end
+    comparison under shared preprocessing.
+    """
+    import statistics
+
+    samples: Dict[str, Dict[str, List[int]]] = {}
+    for r in raw_rows:
+        if r.get("experiment") != experiment:
+            continue
+        side = samples.setdefault(r["input"], {"reference": [], "candidate": []})
+        side[r["implementation"]].append(int(r["analysis_ns"]))
+    result = {}
+    for key, side in samples.items():
+        ref = statistics.median(side["reference"])
+        cand = statistics.median(side["candidate"])
+        result[key] = {"reference": ref, "candidate": cand, "speedup": ref / cand}
+    return result
+
+
 def generate_shared_inevitability_macros(
     summary_rows: List[Dict[str, Any]], raw_rows: List[Dict[str, Any]]
 ) -> str:
@@ -840,15 +924,12 @@ def generate_shared_inevitability_macros(
     def speedups(experiment: str) -> List[float]:
         return [float(real[experiment][b]["reference_over_candidate_time"]) for b in subjects]
 
-    def end_to_end(experiment: str) -> float:
+    inputs = {r["benchmark"]: r["input"] for e in real.values() for r in e.values()}
+
+    def end_to_end(experiment: str) -> List[float]:
         # Both sides pay for the same compact matrix; the copy is excluded.
-        ratios = []
-        for b in subjects:
-            runs = [r for r in raw_rows if r.get("experiment") == experiment and r["benchmark"] == b]
-            ref = [int(r["analysis_ns"]) for r in runs if r["implementation"] == "reference"]
-            cand = [int(r["analysis_ns"]) for r in runs if r["implementation"] == "candidate"]
-            ratios.append(statistics.median(ref) / statistics.median(cand))
-        return geometric_mean(ratios)
+        ratios = end_to_end_speedups(raw_rows, experiment)
+        return [ratios[inputs[b]]["speedup"] for b in subjects]
 
     macros = [
         "% Auto-generated shared-inevitability macros by generate_paper_artifacts.py",
@@ -862,10 +943,15 @@ def generate_shared_inevitability_macros(
             f"\\newcommand{{\\Shared{name}Max}}{{{max(values):.2f}}}",
             f"\\newcommand{{\\Shared{name}SlowerCount}}{{{sum(1 for v in values if v < 1.0)}}}",
         ]
-    macros += [
-        f"\\newcommand{{\\SharedEnumEndToEndGeomean}}{{{end_to_end(names['Enum']):.2f}}}",
-        f"\\newcommand{{\\SharedClosureEndToEndGeomean}}{{{end_to_end(names['Closure']):.2f}}}",
-    ]
+    for name in ("Enum", "Closure", "EnumSharedGuardBoth", "ClosureSharedGuardBoth"):
+        values = end_to_end(names[name])
+        label = name.replace("SharedGuardBoth", "GuardBoth")
+        macros += [
+            f"\\newcommand{{\\Shared{label}EndToEndGeomean}}{{{geometric_mean(values):.2f}}}",
+            f"\\newcommand{{\\Shared{label}EndToEndMin}}{{{min(values):.2f}}}",
+            f"\\newcommand{{\\Shared{label}EndToEndMax}}{{{max(values):.2f}}}",
+            f"\\newcommand{{\\Shared{label}EndToEndSlowerCount}}{{{sum(1 for v in values if v < 1.0)}}}",
+        ]
     for name in ("Enum", "Closure"):
         values = [float(r["reference_over_candidate_time"]) for r in summary_rows
                   if r.get("experiment") == names[name] and not is_real_world(r)]
@@ -877,32 +963,68 @@ def generate_shared_inevitability_macros(
     return "\n".join(macros) + "\n"
 
 
-def with_cav21_closure(summary_rows: List[Dict[str, Any]], results_dir: Path) -> List[Dict[str, Any]]:
-    """Replace the real-subject rq1-closure rows by rq1-closure-cav21 rows of results_dir.
+def generate_random_graph_macros(enum_raw: List[Dict[str, Any]],
+                                 closure_raw: List[Dict[str, Any]]) -> str:
+    """Macros for the CAV'21 random-graph family (random_graph_family.py).
 
-    The replacement rows are relabelled rq1-closure, so every consumer of the
-    real-subject closure comparison (macros and figure panel (b)) switches
-    baseline without further changes.  Both runs must cover the same real
-    subjects; synthetic rows are left alone, since no consumer reads them.
+    Each module holds the random graphs of one edge count; enumeration runs on
+    the plain graphs and closure on the rooted variants.  Speedups are end to
+    end under shared preprocessing, like the real-subject figures, and are
+    geometric means over the modules.
+    """
+    def first_runs(raw: List[Dict[str, Any]], experiment: str, side: str) -> List[Dict[str, Any]]:
+        return [r for r in raw if r.get("experiment") == experiment
+                and r["implementation"] == side and r["run"] == "0"]
+
+    macros = ["% Auto-generated random-graph macros by generate_paper_artifacts.py"]
+    plain = first_runs(enum_raw, "rq1-enumeration", "candidate")
+    macros += [
+        f"\\newcommand{{\\RandomGraphCount}}{{{sum(int(r['functions']) for r in plain)}}}",
+        f"\\newcommand{{\\RandomModuleCount}}{{{len(plain)}}}",
+        f"\\newcommand{{\\RandomDODPairCount}}{{{sum(int(r['dod_pairs']) for r in plain)}}}",
+    ]
+    for name, raw, prefix in (("Enum", enum_raw, "rq1-enumeration"),
+                              ("Closure", closure_raw, "rq1-closure-cav21")):
+        guarded = first_runs(raw, prefix + "-guarded-both", "candidate")
+        unguarded = sum(int(r["functions"]) - int(r["guard_skipped"]) for r in guarded)
+        macros.append(f"\\newcommand{{\\Random{name}UnguardedCount}}{{{unguarded}}}")
+        for label, experiment in (("", prefix + "-shared"),
+                                  ("GuardBoth", prefix + "-shared-guarded-both")):
+            values = [v["speedup"] for v in end_to_end_speedups(raw, experiment).values()]
+            macros += [
+                f"\\newcommand{{\\Random{name}{label}Geomean}}{{{geometric_mean(values):.1f}}}",
+                f"\\newcommand{{\\Random{name}{label}Min}}{{{min(values):.2f}}}",
+                f"\\newcommand{{\\Random{name}{label}Max}}{{{max(values):.1f}}}",
+            ]
+    return "\n".join(macros) + "\n"
+
+
+def with_real_rows_from(summary_rows: List[Dict[str, Any]], results_dir: Path,
+                        source: str, target: str, option: str) -> List[Dict[str, Any]]:
+    """Replace the real-subject ``target`` rows by the ``source`` rows of results_dir.
+
+    The replacement rows are relabelled ``target``, so every consumer of the
+    real-subject comparison (macros and figure panels) switches without
+    further changes.  Both runs must cover the same real subjects; synthetic
+    rows are left alone, since the real-subject consumers do not read them.
     """
     summary_file = results_dir / "summary.csv"
     if not summary_file.is_file():
-        print(f"Error: {summary_file} not found; needed for --closure-baseline=cav21.",
-              file=sys.stderr)
+        print(f"Error: {summary_file} not found; needed for {option}.", file=sys.stderr)
         sys.exit(1)
-    cav = [dict(r, experiment="rq1-closure") for r in read_summary_csv(summary_file)
-           if r.get("experiment") == "rq1-closure-cav21" and is_real_world(r)]
+    replacement = [dict(r, experiment=target) for r in read_summary_csv(summary_file)
+                   if r.get("experiment") == source and is_real_world(r)]
 
     def replaced(r: Dict[str, Any]) -> bool:
-        return r.get("experiment") == "rq1-closure" and is_real_world(r)
+        return r.get("experiment") == target and is_real_world(r)
 
     old = {r["input"] for r in summary_rows if replaced(r)}
-    new = {r["input"] for r in cav}
+    new = {r["input"] for r in replacement}
     if old != new:
-        print(f"Error: rq1-closure-cav21 in {summary_file} covers {len(new)} real subjects, "
-              f"rq1-closure covers {len(old)}; they must match.", file=sys.stderr)
+        print(f"Error: {source} in {summary_file} covers {len(new)} real subjects, "
+              f"{target} covers {len(old)}; they must match.", file=sys.stderr)
         sys.exit(1)
-    return [r for r in summary_rows if not replaced(r)] + cav
+    return [r for r in summary_rows if not replaced(r)] + replacement
 
 
 def main() -> None:
@@ -953,6 +1075,20 @@ def main() -> None:
              "--closure-guard-results-dir)",
     )
     parser.add_argument(
+        "--random-results-dir",
+        type=Path,
+        default=LOTUS_ROOT / "control-dependence-random-results",
+        help="Path to the random-graph results (enumeration/ and closure/ subdirectories)",
+    )
+    parser.add_argument(
+        "--shared-inevitability",
+        action="store_true",
+        help="Draw the real-subject \\EnumSpeedup* / \\ClosureSpeedup* macros and figure "
+             "panels (a) and (b) from the shared-preprocessing experiments in "
+             "--shared-results-dir: both sides compute the same compact inevitability "
+             "matrix and are timed end to end; requires --closure-baseline cav21",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=WORKSPACE_ROOT / "paper-control-dep" / "sections" / "generated",
@@ -966,8 +1102,33 @@ def main() -> None:
         sys.exit(1)
 
     summary_rows = read_summary_csv(summary_file)
-    if args.closure_baseline == "cav21":
-        summary_rows = with_cav21_closure(summary_rows, args.closure_guard_results_dir)
+    if args.shared_inevitability:
+        # Both sides share the compact inevitability matrix and are timed after
+        # it; the shared closure experiments use the CAV'21 closure.
+        if args.closure_baseline != "cav21":
+            print("Error: --shared-inevitability needs --closure-baseline cav21.",
+                  file=sys.stderr)
+            sys.exit(1)
+        shared_raw = read_summary_csv(args.shared_results_dir / "raw.csv")
+        for source, target in (("rq1-enumeration-shared", "rq1-enumeration"),
+                               ("rq1-closure-cav21-shared", "rq1-closure")):
+            summary_rows = with_real_rows_from(
+                summary_rows, args.shared_results_dir, source, target,
+                "--shared-inevitability")
+            # The summary compares the sides after the shared matrix; report the
+            # end-to-end comparison in which both sides pay for it instead.
+            ratios = end_to_end_speedups(shared_raw, source)
+            for row in summary_rows:
+                if row.get("experiment") == target and is_real_world(row):
+                    e2e = ratios[row["input"]]
+                    row.update(reference_median_ns=e2e["reference"],
+                               candidate_median_ns=e2e["candidate"],
+                               reference_over_candidate_time=e2e["speedup"],
+                               candidate_over_reference_time=1.0 / e2e["speedup"])
+    elif args.closure_baseline == "cav21":
+        summary_rows = with_real_rows_from(
+            summary_rows, args.closure_guard_results_dir, "rq1-closure-cav21",
+            "rq1-closure", "--closure-baseline=cav21")
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     macros_code = generate_paper_macros(summary_rows)
@@ -989,8 +1150,6 @@ def main() -> None:
             cf_macros, cf_table, cf_ablation = generate_closure_family_artifacts(closure_rows)
             (args.output_dir / "closure_family_macros.tex").write_text(cf_macros)
             print(f"Written: {args.output_dir / 'closure_family_macros.tex'}")
-            (args.output_dir / "tab_closure_family.tex").write_text(cf_table)
-            print(f"Written: {args.output_dir / 'tab_closure_family.tex'}")
             (args.output_dir / "tab_ablation_family.tex").write_text(cf_ablation)
             print(f"Written: {args.output_dir / 'tab_ablation_family.tex'}")
     else:
@@ -1021,8 +1180,20 @@ def main() -> None:
         os_macros, os_table = generate_output_sensitivity_artifacts(read_summary_csv(closure_raw))
         (args.output_dir / "output_sensitivity_macros.tex").write_text(os_macros)
         print(f"Written: {args.output_dir / 'output_sensitivity_macros.tex'}")
-        (args.output_dir / "tab_output_sensitivity.tex").write_text(os_table)
-        print(f"Written: {args.output_dir / 'tab_output_sensitivity.tex'}")
+        # The paper merges the output-sensitivity split with the closure-family
+        # comparison into one table; its closure columns follow the baseline.
+        if args.closure_baseline == "cav21":
+            family_summary = args.closure_cav21_family_dir / "summary.csv"
+            family_experiment, digits = "rq1-closure-cav21", 1
+        else:
+            family_summary = closure_summary
+            family_experiment, digits = "rq1-closure", 0
+        if family_summary.is_file():
+            (args.output_dir / "tab_scaling_combined.tex").write_text(
+                generate_scaling_combined_table(
+                    read_summary_csv(closure_raw), read_summary_csv(family_summary),
+                    family_experiment, digits))
+            print(f"Written: {args.output_dir / 'tab_scaling_combined.tex'}")
     else:
         print(f"Note: {closure_raw} not found; skipping output-sensitivity artifacts")
 
@@ -1079,6 +1250,16 @@ def main() -> None:
         print(f"Written: {args.output_dir / 'shared_inevitability_macros.tex'}")
     else:
         print(f"Note: {shared_summary} not found; skipping shared-inevitability artifacts")
+
+    random_enum = args.random_results_dir / "enumeration" / "raw.csv"
+    random_closure = args.random_results_dir / "closure" / "raw.csv"
+    if random_enum.is_file() and random_closure.is_file():
+        (args.output_dir / "random_graph_macros.tex").write_text(
+            generate_random_graph_macros(
+                read_summary_csv(random_enum), read_summary_csv(random_closure)))
+        print(f"Written: {args.output_dir / 'random_graph_macros.tex'}")
+    else:
+        print(f"Note: {random_enum} not found; skipping random-graph artifacts")
 
 
 
