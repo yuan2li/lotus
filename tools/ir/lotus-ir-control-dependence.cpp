@@ -494,8 +494,8 @@ void printExitStats(Module &module) {
   // Runs outside the timed paths: it reports where the biclique construction
   // leaves each binary decision, which shows why the order relation is empty
   // on CFGs without irreducible control flow.
-  outs() << "function,decisions,single_entry,shared_entry,decision_entry,"
-            "no_cycle,transitions,biclique\n";
+  outs() << "function,decisions,few_inevitable,single_entry,shared_entry,"
+            "decision_entry,no_cycle,transitions,biclique\n";
   for (Function &function : module) {
     if (function.isDeclaration() || function.empty())
       continue;
@@ -509,9 +509,10 @@ void printExitStats(Module &module) {
     for (GraphNode *decision : fg.graph.predicates())
       binaryDecisions += decision->successors().size() == 2;
     outs() << '"' << function.getName() << "\"," << binaryDecisions << ','
-           << stats.singleEntry << ',' << stats.sharedEntry << ','
-           << stats.decisionEntry << ',' << stats.noCycle << ','
-           << stats.transitions << ',' << stats.biclique << '\n';
+           << stats.fewInevitable << ',' << stats.singleEntry << ','
+           << stats.sharedEntry << ',' << stats.decisionEntry << ','
+           << stats.noCycle << ',' << stats.transitions << ',' << stats.biclique
+           << '\n';
   }
 }
 
