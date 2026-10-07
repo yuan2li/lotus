@@ -620,6 +620,52 @@ TEST(ControlDependenceTest, CompactDODMatchesDefinitionOnAllFourNodeGraphs) {
   }
 }
 
+TEST(ControlDependenceTest, DODExitStatsAccountForEveryBinaryDecision) {
+  // Every binary decision leaves Algorithm 2 through exactly one counted exit,
+  // and a decision with |S_p| < 3 leaves at the inevitable-set precheck.
+  constexpr unsigned nodeCount = 4;
+  constexpr unsigned graphCount = 1u << (nodeCount * nodeCount);
+  size_t fewInevitable = 0;
+  size_t bicliques = 0;
+  for (unsigned mask = 0; mask < graphCount; ++mask) {
+    lotus::cd::detail::Graph graph;
+    std::vector<lotus::cd::detail::GraphNode *> nodes;
+    for (unsigned index = 0; index < nodeCount; ++index)
+      nodes.push_back(&graph.createNode());
+    for (unsigned source = 0; source < nodeCount; ++source)
+      for (unsigned target = 0; target < nodeCount; ++target)
+        if (mask & (1u << (source * nodeCount + target)))
+          graph.addEdge(*nodes[source], *nodes[target]);
+
+    auto inevitability = lotus::cd::detail::computeInevitability(graph);
+    lotus::cd::detail::DODExitStats stats;
+    auto result = lotus::cd::detail::computeCompactDODWithExitStats(
+        graph, inevitability, stats);
+    size_t binaryDecisions = 0;
+    size_t smallRows = 0;
+    for (auto *node : nodes) {
+      if (node->successors().size() != 2)
+        continue;
+      ++binaryDecisions;
+      smallRows += inevitability.row(node).count() < 3;
+    }
+    ASSERT_EQ(stats.fewInevitable + stats.singleEntry + stats.sharedEntry +
+                  stats.decisionEntry + stats.noCycle + stats.transitions +
+                  stats.biclique,
+              binaryDecisions)
+        << "graph mask " << mask;
+    ASSERT_EQ(stats.fewInevitable, smallRows) << "graph mask " << mask;
+    ASSERT_EQ(stats.biclique, result.size()) << "graph mask " << mask;
+    fewInevitable += stats.fewInevitable;
+    bicliques += stats.biclique;
+  }
+  std::cout << "[ SWEEP    ] " << fewInevitable
+            << " decisions left at the precheck, " << bicliques
+            << " bicliques\n";
+  EXPECT_GT(fewInevitable, 0u);
+  EXPECT_GT(bicliques, 0u);
+}
+
 TEST(ControlDependenceTest, ICFGAdapterRunsGraphAlgorithmsOnLotusICFG) {
   llvm::LLVMContext context;
   auto module = parseModule(context, R"(

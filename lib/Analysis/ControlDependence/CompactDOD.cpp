@@ -205,6 +205,11 @@ computeBicliqueFor(Graph &graph, GraphNode *decision,
   const auto &set = inevitability.row(decision);
   if (!set.test(decision->getID()))
     return leave(&DODExitStats::noCycle);
+  // Every DOD endpoint lies in S_p - {p}, so a pair needs two vertices there.
+  // Checking this first avoids the two first-hit searches, which otherwise
+  // walk the whole graph when S_p = {p}.
+  if (set.count() < 3)
+    return leave(&DODExitStats::fewInevitable);
 
   GraphNode *firstSuccessor = decision->successors()[0];
   GraphNode *secondSuccessor = decision->successors()[1];
