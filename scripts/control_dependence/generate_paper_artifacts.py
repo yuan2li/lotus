@@ -960,6 +960,44 @@ def generate_shared_inevitability_macros(
     return "\n".join(macros) + "\n"
 
 
+def generate_shared_guard_sota_macros(
+    summary_rows: List[Dict[str, Any]], raw_rows: List[Dict[str, Any]]
+) -> str:
+    """Macros for the reducibility guard on the SOTA side only, under shared preprocessing.
+
+    Like the real-subject speedups, the ratios are end to end with both sides
+    computing the same compact inevitability matrix; a guarded SOTA function
+    that the guard skips computes nothing at all.  The unguarded shared
+    experiments come from the same run and anchor the comparison.
+    """
+    names = {
+        "Enum": "rq1-enumeration-shared",
+        "EnumGuardSota": "rq1-enumeration-shared-guarded-sota",
+        "Closure": "rq1-closure-cav21-shared",
+        "ClosureGuardSota": "rq1-closure-cav21-shared-guarded-sota",
+    }
+    real = {
+        e: {r["benchmark"]: r["input"] for r in summary_rows
+            if r.get("experiment") == e and is_real_world(r)}
+        for e in names.values()
+    }
+    subjects = sorted(set.intersection(*(set(v) for v in real.values())))
+    macros = [
+        "% Auto-generated shared SOTA-only-guard macros by generate_paper_artifacts.py",
+        f"\\newcommand{{\\SharedGuardSotaSubjectCount}}{{{len(subjects)}}}",
+    ]
+    for name, experiment in names.items():
+        ratios = end_to_end_speedups(raw_rows, experiment)
+        values = [ratios[real[experiment][b]]["speedup"] for b in subjects]
+        macros += [
+            f"\\newcommand{{\\SharedRun{name}Geomean}}{{{geometric_mean(values):.2f}}}",
+            f"\\newcommand{{\\SharedRun{name}Min}}{{{min(values):.2f}}}",
+            f"\\newcommand{{\\SharedRun{name}Max}}{{{max(values):.2f}}}",
+            f"\\newcommand{{\\SharedRun{name}SlowerCount}}{{{sum(1 for v in values if v < 1.0)}}}",
+        ]
+    return "\n".join(macros) + "\n"
+
+
 def generate_random_graph_macros(enum_raw: List[Dict[str, Any]],
                                  closure_raw: List[Dict[str, Any]]) -> str:
     """Macros for the CAV'21 random-graph family (random_graph_family.py).
@@ -1070,6 +1108,12 @@ def main() -> None:
              "Danicic et al.'s strong control closure (rq1-closure in --results-dir) or "
              "Chalupa et al.'s NTSCD and DOD closure (rq1-closure-cav21 in "
              "--closure-guard-results-dir)",
+    )
+    parser.add_argument(
+        "--shared-guard-sota-results-dir",
+        type=Path,
+        default=LOTUS_ROOT / "control-dependence-shared-guard-sota-results",
+        help="Path to the shared-preprocessing run with the guard on the SOTA side only",
     )
     parser.add_argument(
         "--random-results-dir",
@@ -1247,6 +1291,16 @@ def main() -> None:
         print(f"Written: {args.output_dir / 'shared_inevitability_macros.tex'}")
     else:
         print(f"Note: {shared_summary} not found; skipping shared-inevitability artifacts")
+
+    sgs_summary = args.shared_guard_sota_results_dir / "summary.csv"
+    sgs_raw = args.shared_guard_sota_results_dir / "raw.csv"
+    if sgs_summary.is_file() and sgs_raw.is_file():
+        (args.output_dir / "shared_guard_sota_macros.tex").write_text(
+            generate_shared_guard_sota_macros(
+                read_summary_csv(sgs_summary), read_summary_csv(sgs_raw)))
+        print(f"Written: {args.output_dir / 'shared_guard_sota_macros.tex'}")
+    else:
+        print(f"Note: {sgs_summary} not found; skipping shared SOTA-only-guard artifacts")
 
     random_enum = args.random_results_dir / "enumeration" / "raw.csv"
     random_closure = args.random_results_dir / "closure" / "raw.csv"
