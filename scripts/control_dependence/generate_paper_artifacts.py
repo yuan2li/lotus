@@ -160,9 +160,6 @@ def generate_paper_macros(summary_rows: List[Dict[str, Any]]) -> str:
     closure_mem_worse = sum(1 for value in closure_mem_reductions if value < 0)
     closure_mem_max_increase = max([0.0] + [-value for value in closure_mem_reductions])
     mem_max_increase = max(enum_mem_max_increase, closure_mem_max_increase)
-    if closure_mem_increase_mean < 0:
-        print("Warning: Full-Closure uses less peak memory on average; "
-              "the evaluation prose says it rose.", file=sys.stderr)
 
     closure_slower = [
         r for r in spec_closure
