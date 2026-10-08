@@ -24,15 +24,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-# Ensure we can import DiGraph from paper-control-dep/compact_dod_reference.py
 LOTUS_ROOT = Path(__file__).resolve().parents[2]
-WORKSPACE_ROOT = LOTUS_ROOT.parent
-sys.path.insert(0, str(WORKSPACE_ROOT / "paper-control-dep"))
 
 from compact_dod_reference import DiGraph, CompactDOD
 
@@ -297,6 +293,12 @@ def main() -> None:
         help="Directory to store generated synthetic .ll benchmarks",
     )
     parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=LOTUS_ROOT / "control-dependence-synthetic-results",
+        help="Directory for synthetic_benchmark_results.csv written by --benchmark",
+    )
+    parser.add_argument(
         "--benchmark",
         action="store_true",
         help="Run Python synthetic scaling benchmark",
@@ -350,7 +352,8 @@ def main() -> None:
     ):
         print("=== Running Synthetic Benchmark (Proposition 5.1 Verification) ===")
         results = benchmark_synthetic(args.k_values)
-        out_csv = WORKSPACE_ROOT / "synthetic_benchmark_results.csv"
+        args.results_dir.mkdir(parents=True, exist_ok=True)
+        out_csv = args.results_dir / "synthetic_benchmark_results.csv"
         with out_csv.open("w", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=list(results[0].keys()))
             writer.writeheader()
