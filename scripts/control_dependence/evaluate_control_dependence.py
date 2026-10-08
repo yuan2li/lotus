@@ -31,7 +31,7 @@ Paper-to-driver map
     the entry is reducible and no unreachable decision reaches a cycle; its
     cost is included in ``analysis_ns``. These answer "why not check
     reducibility first?" and are not run by default.
-``rq1-enumeration-shared`` / ``rq1-closure-cav21-shared`` (and ``-guarded-both``)
+``rq1-enumeration-shared`` / ``rq1-closure-cav21-shared`` (and ``-guarded-sota`` / ``-guarded-both``)
     The SOTA side runs with ``--shared-inevitability`` on a copy of the compact
     inevitability matrix, and both sides are compared on
     ``post_inevitability_ns``. This separates the data-structure difference in
@@ -197,6 +197,17 @@ EXPERIMENTS: dict[str, Experiment] = {
         candidate_args=("--reducibility-guard",),
         metric="post_inevitability_ns",
     ),
+    "rq1-enumeration-shared-guarded-sota": Experiment(
+        "RQ1",
+        "dod",
+        "dod-compact",
+        "SOTA-Enumerate+Guard (shared)",
+        "Full-Enumerate",
+        visit_pairs=True,
+        result_field="dod_pairs",
+        reference_args=("--shared-inevitability", "--reducibility-guard"),
+        metric="post_inevitability_ns",
+    ),
     "rq1-closure-cav21-shared": Experiment(
         "RQ1",
         "ntscd-dod-closure",
@@ -205,6 +216,16 @@ EXPERIMENTS: dict[str, Experiment] = {
         "Full-Closure",
         result_field="closure_size",
         reference_args=("--shared-inevitability",),
+        metric="post_inevitability_ns",
+    ),
+    "rq1-closure-cav21-shared-guarded-sota": Experiment(
+        "RQ1",
+        "ntscd-dod-closure",
+        "compact-closure",
+        "SOTA-Closure-CAV21+Guard (shared)",
+        "Full-Closure",
+        result_field="closure_size",
+        reference_args=("--shared-inevitability", "--reducibility-guard"),
         metric="post_inevitability_ns",
     ),
     "rq1-closure-cav21-shared-guarded-both": Experiment(
