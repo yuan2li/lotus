@@ -66,6 +66,14 @@ python3 scripts/control_dependence/evaluate_control_dependence.py \
 #    combined scaling table (output sensitivity + closure family)
 python3 scripts/control_dependence/generate_paper_artifacts.py \
   --closure-baseline cav21 --shared-inevitability
+
+# 9. One run of the four non-empty-family experiments, so the scaling table
+#    (output sensitivity + closure columns) and the ablation table share their
+#    Full times; step 8 reads it through --family-results-dir, so run this first
+python3 scripts/control_dependence/evaluate_control_dependence.py \
+  benchmarks/synthetic/closure_k*.ll \
+  --experiments rq1-enumeration,rq1-closure-cav21,rq2-cardinality,rq2-consumption \
+  --repeat 5 --warmup 1 --seed-count 4 --output-dir control-dependence-family-results
 ```
 
 ## Running the control-dependence unit tests

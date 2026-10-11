@@ -16,7 +16,7 @@ import json
 import math
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 
 def geometric_mean(values: Sequence[float]) -> float:
@@ -752,12 +752,17 @@ def generate_scaling_combined_table(raw_rows: List[Dict[str, Any]],
     return "\n".join(lines) + "\n"
 
 
-def generate_closure_cav21_family_artifacts(rows: List[Dict[str, Any]]) -> tuple[str, str]:
+def generate_closure_cav21_family_artifacts(
+    rows: List[Dict[str, Any]],
+    speedup_rows: Optional[List[Dict[str, Any]]] = None,
+) -> tuple[str, str]:
     """Macros and a table for the non-empty closure family against both priors.
 
     ``rq1-closure`` uses Danicic et al.'s strong control closure and
     ``rq1-closure-cav21`` Chalupa et al.'s NTSCD and DOD closure; both come
     from one run with the same seeds, so the two speedup columns are comparable.
+    The \\ClosureCavFamilySpeedup* macros describe the paper's scaling table;
+    when that table comes from another run, pass its rows as speedup_rows.
     """
     def k_of(row: Dict[str, Any]) -> int:
         return int(str(row["benchmark"]).replace("closure_k", "").replace(".ll", ""))
@@ -765,7 +770,11 @@ def generate_closure_cav21_family_artifacts(rows: List[Dict[str, Any]]) -> tuple
     danicic = {k_of(r): r for r in rows if r.get("experiment") == "rq1-closure"}
     cav = {k_of(r): r for r in rows if r.get("experiment") == "rq1-closure-cav21"}
     ks = sorted(set(danicic) & set(cav))
-    speedups = [float(cav[k]["reference_over_candidate_time"]) for k in ks]
+    if speedup_rows is not None:
+        table_cav = {k_of(r): r for r in speedup_rows if r.get("experiment") == "rq1-closure-cav21"}
+        speedups = [float(table_cav[k]["reference_over_candidate_time"]) for k in sorted(table_cav)]
+    else:
+        speedups = [float(cav[k]["reference_over_candidate_time"]) for k in ks]
 
     macros = [
         "% Auto-generated CAV'21-baseline closure-family macros by generate_paper_artifacts.py",
@@ -1124,6 +1133,14 @@ def main() -> None:
              "--closure-guard-results-dir)",
     )
     parser.add_argument(
+        "--family-results-dir",
+        type=Path,
+        default=LOTUS_ROOT / "control-dependence-family-results",
+        help="Path to the single run of rq1-enumeration, rq1-closure-cav21, "
+             "rq2-cardinality and rq2-consumption on closure_k*.ll; when present, "
+             "the scaling and ablation tables and their macros all come from it",
+    )
+    parser.add_argument(
         "--shared-guard-sota-results-dir",
         type=Path,
         default=LOTUS_ROOT / "control-dependence-shared-guard-sota-results",
@@ -1199,8 +1216,22 @@ def main() -> None:
     print(f"Written: {args.output_dir / 'fig_rq1_results.tikz'}")
 
     closure_summary = args.closure_results_dir / "summary.csv"
-    if closure_summary.is_file():
-        closure_rows = read_summary_csv(closure_summary)
+    # One run on the non-empty family for the scaling table (output sensitivity
+    # and closure columns) and the ablation table, so their Full times agree.
+    family_summary_file = args.family_results_dir / "summary.csv"
+    family_raw_file = args.family_results_dir / "raw.csv"
+    family_run = family_summary_file.is_file() and family_raw_file.is_file()
+    family_run_rows = read_summary_csv(family_summary_file) if family_run else []
+    if family_run:
+        print(f"Note: scaling and ablation tables from {args.family_results_dir}")
+    if closure_summary.is_file() or family_run:
+        # The family run compares closure with the CAV'21 closure; it stands in
+        # for rq1-closure, whose rows supply the k range and the closure size.
+        closure_rows = (
+            [dict(r, experiment="rq1-closure") if r.get("experiment") == "rq1-closure-cav21" else r
+             for r in family_run_rows]
+            if family_run else read_summary_csv(closure_summary)
+        )
         if closure_rows:
             cf_macros, cf_table, cf_ablation = generate_closure_family_artifacts(closure_rows)
             (args.output_dir / "closure_family_macros.tex").write_text(cf_macros)
@@ -1230,7 +1261,7 @@ def main() -> None:
     else:
         print(f"Note: {sweep_summary} not found; skipping seed-sweep artifacts")
 
-    closure_raw = args.closure_results_dir / "raw.csv"
+    closure_raw = family_raw_file if family_run else args.closure_results_dir / "raw.csv"
     if closure_raw.is_file():
         os_macros, os_table = generate_output_sensitivity_artifacts(read_summary_csv(closure_raw))
         (args.output_dir / "output_sensitivity_macros.tex").write_text(os_macros)
@@ -1238,7 +1269,8 @@ def main() -> None:
         # The paper merges the output-sensitivity split with the closure-family
         # comparison into one table; its closure columns follow the baseline.
         if args.closure_baseline == "cav21":
-            family_summary = args.closure_cav21_family_dir / "summary.csv"
+            family_summary = (family_summary_file if family_run
+                              else args.closure_cav21_family_dir / "summary.csv")
             family_experiment, digits = "rq1-closure-cav21", 1
         else:
             family_summary = closure_summary
@@ -1280,7 +1312,8 @@ def main() -> None:
     cav_sweep_raw = args.closure_cav21_family_dir / "closure_seed_sweep_raw.csv"
     if cav_family.is_file() and cav_sweep.is_file() and cav_sweep_raw.is_file():
         family_rows = read_summary_csv(cav_family)
-        cf_macros, cf_table = generate_closure_cav21_family_artifacts(family_rows)
+        cf_macros, cf_table = generate_closure_cav21_family_artifacts(
+            family_rows, family_run_rows if family_run else None)
         sw_macros, sw_table = generate_seed_sweep_artifacts(
             read_summary_csv(cav_sweep), read_summary_csv(cav_sweep_raw),
             family_rows, prefix="ClosureCav", family_experiment="rq1-closure-cav21",
