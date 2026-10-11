@@ -72,8 +72,8 @@ cl::opt<unsigned> SeedRng(
     cl::init(0));
 cl::opt<bool> DODExitStatsFlag(
     "dod-exit-stats",
-    cl::desc("report where Algorithm 2 leaves each binary decision, per "
-             "function, instead of timing an algorithm"),
+    cl::desc("report where the biclique construction leaves each binary "
+             "decision, per function, instead of timing an algorithm"),
     cl::init(false));
 
 cl::opt<bool> ReducibilityGuard(
@@ -589,8 +589,9 @@ void printJSON(const std::vector<Record> &records) {
 } // namespace
 
 void printExitStats(Module &module) {
-  // Runs outside the timed paths: it reports where Algorithm 2 leaves each
-  // binary decision, which explains the empty order relation on real CFGs.
+  // Runs outside the timed paths: it reports where the biclique construction
+  // leaves each binary decision, which explains the empty order relation on
+  // real CFGs.
   outs() << "function,decisions,few_inevitable,single_entry,shared_entry,"
             "decision_entry,no_cycle,transitions,biclique\n";
   for (Function &function : module) {
@@ -640,8 +641,8 @@ int main(int argc, char **argv) {
     return 1;
   }
   // Lower multiway switches to cascades of binary branches so their decisions
-  // become 2-way and participate in DOD analysis (paper TODO 3.1).  Without
-  // this, blocks whose successor count differs from two are skipped.
+  // become 2-way and participate in DOD analysis.  Without this, blocks whose
+  // successor count differs from two are skipped.
   if (LowerSwitch) {
     legacy::PassManager passes;
     passes.add(createLowerSwitchPass());

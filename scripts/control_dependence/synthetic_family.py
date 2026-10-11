@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Synthetic graph family generator and benchmark based on Proposition 5.1.
+"""Generator and benchmark for the cubic-output synthetic DOD family.
 
-Proposition 5.1:
 For every k >= 1, there is a digraph of maximum out-degree two on 3k vertices
 with k^3 triples, while the biclique representation contains 2k^2 incidences.
 
@@ -34,7 +33,7 @@ from compact_dod_reference import DiGraph, CompactDOD
 
 
 def build_synthetic_graph(k: int) -> DiGraph:
-    """Construct the Proposition 5.1 graph on 3k vertices.
+    """Construct the cubic-output graph on 3k vertices.
 
     Vertex indexing:
     - x_0, ..., x_{k-1}: indices 0 ... k-1
@@ -64,7 +63,7 @@ def build_synthetic_graph(k: int) -> DiGraph:
 
 
 def build_closure_graph(k: int) -> DiGraph:
-    """Well-formed variant of Proposition 5.1 used for the closure experiment.
+    """Well-formed variant of the cubic-output family used for the closure experiment.
 
     ``build_synthetic_graph`` places the decisions off the cycle with no
     predecessors.  Emitted as a CFG that leaves p_1..p_{k-1} unreachable, which
@@ -108,7 +107,7 @@ def generate_closure_llvm_ir(k: int) -> str:
         f'source_filename = "closure_k{k}.c"',
         'target triple = "arm64-apple-macosx"',
         "",
-        "; Well-formed Proposition 5.1 family: the dispatcher chain makes every",
+        "; Well-formed cubic-output family: the dispatcher chain makes every",
         "; decision reachable from the entry, so no block is dead and the rooted",
         "; strong-closure hypothesis (reachable start) holds.",
         "define void @closure_func(i32 %cond) {",
@@ -137,7 +136,7 @@ def generate_closure_llvm_ir(k: int) -> str:
 
 
 def generate_synthetic_llvm_ir(k: int) -> str:
-    """Generate an LLVM IR module (.ll) matching Proposition 5.1 structure."""
+    """Generate an LLVM IR module (.ll) with the cubic-output structure."""
     lines = [
         "; ModuleID = 'synthetic_k{}.ll'".format(k),
         'source_filename = "synthetic_k{}.c"'.format(k),
@@ -350,7 +349,7 @@ def main() -> None:
     if args.benchmark or not (
         args.generate_ir or args.generate_suite or args.generate_closure_suite
     ):
-        print("=== Running Synthetic Benchmark (Proposition 5.1 Verification) ===")
+        print("=== Running Synthetic Benchmark (cubic-output family) ===")
         results = benchmark_synthetic(args.k_values)
         args.results_dir.mkdir(parents=True, exist_ok=True)
         out_csv = args.results_dir / "synthetic_benchmark_results.csv"

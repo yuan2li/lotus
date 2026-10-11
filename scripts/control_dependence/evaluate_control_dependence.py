@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Run the paper's reproducible RQ1/RQ2 control-dependence experiments.
+"""Run the paper's reproducible control-dependence experiments.
 
 The C++ driver executes one primitive algorithm once. This script owns all
 experiment policy: input discovery, warmups, randomized run ordering,
 repetition, aggregation, output checks, and report generation.
 
-RQ1 compares the full algorithms with the state of the art for DOD enumeration
-and rooted strong control closure. RQ2 compares the full algorithms with the
-Exact-Set and Eager-Pairs ablations.
+The ``rq1-*`` experiments compare the full algorithms with the state of the
+art for DOD enumeration and rooted strong control closure; the ``rq2-*``
+experiments compare the full algorithms with the Exact-Set and Eager-Pairs
+ablations.
 
 Paper-to-driver map
 -------------------
@@ -15,7 +16,7 @@ Paper-to-driver map
 ``rq1-enumeration``
     SOTA-Enumerate vs. Full-Enumerate. Both algorithms visit all K exact DOD
     triples, so ``analysis_ns`` is the like-for-like end-to-end enumeration
-    time used in RQ1.
+    time.
 ``rq1-closure``
     SOTA-Closure vs. Full-Closure. Both receive the same closure seed and return
     the same rooted strong control-closure set.
@@ -82,9 +83,10 @@ class Experiment:
     """One paired comparison corresponding to a paper result.
 
     ``reference`` and ``candidate`` name C++ driver algorithms; their labels are
-    the names printed in the paper. For RQ1 the reference is SOTA and the
-    candidate is Full. For RQ2 the reference is Full and the candidate is the
-    ablation, so candidate/reference is the ablation overhead.
+    the names printed in the paper. In state-of-the-art comparisons the
+    reference is SOTA and the candidate is Full. In ablations the reference is
+    Full and the candidate is the ablation, so candidate/reference is the
+    ablation overhead.
 
     ``visit_pairs`` requests actual traversal of every DOD pair rather than
     compact construction alone. ``result_field`` selects the cardinality that
@@ -111,7 +113,7 @@ class Experiment:
             raise ValueError("reference and candidate algorithms must differ")
 
 
-# RQ1: external, identical-output comparisons against the state of the art.
+# External, identical-output comparisons against the state of the art.
 EXPERIMENTS: dict[str, Experiment] = {
     "rq1-enumeration": Experiment(
         "RQ1",
@@ -130,7 +132,7 @@ EXPERIMENTS: dict[str, Experiment] = {
         "Full-Closure",
         result_field="closure_size",
     ),
-    # RQ2: internal ablations. These intentionally put Full in the reference
+    # Internal ablations. These intentionally put Full in the reference
     # column so candidate_over_reference_* directly denotes ablation overhead.
     "rq2-cardinality": Experiment(
         "RQ2",
@@ -472,7 +474,7 @@ def run_driver(
         f"--lower-switch={lower_switch}",
     ]
     if experiment.visit_pairs:
-        # RQ1 enumeration must pay for visiting all K triples on both sides.
+        # Enumeration must pay for visiting all K triples on both sides.
         command.append("--visit-pairs")
     command.extend(
         experiment.reference_args
@@ -754,8 +756,8 @@ def main() -> int:
                 and len(candidate_fingerprint) == 1
                 and reference_fingerprint == candidate_fingerprint
             )
-            # RQ1 reads reference/candidate as SOTA/Full speedup. RQ2 reads
-            # candidate/reference as the cost of disabling one design choice.
+            # Comparisons read reference/candidate as SOTA/Full speedup; ablations
+            # read candidate/reference as the cost of disabling one design choice.
             reference_over_candidate = float(reference_stats["median"]) / float(
                 candidate_stats["median"]
             )

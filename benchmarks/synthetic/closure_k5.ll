@@ -2,7 +2,7 @@
 source_filename = "closure_k5.c"
 target triple = "arm64-apple-macosx"
 
-; Well-formed Proposition 5.1 family: the dispatcher chain makes every
+; Well-formed cubic-output family: the dispatcher chain makes every
 ; decision reachable from the entry, so no block is dead and the rooted
 ; strong-closure hypothesis (reachable start) holds.
 define void @closure_func(i32 %cond) {

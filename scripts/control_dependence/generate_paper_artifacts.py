@@ -620,7 +620,7 @@ def generate_closure_guard_macros(
 
 
 def generate_exit_distribution_macros(rows: List[Dict[str, Any]]) -> str:
-    """Macros describing where Algorithm 2 leaves each real binary decision.
+    """Macros describing where the biclique construction leaves each real binary decision.
 
     Produced by dod_exit_distribution.py.  Every decision leaving at the early
     checks is the structural reason the order relation is empty on real CFGs.
@@ -651,8 +651,8 @@ def generate_exit_distribution_macros(rows: List[Dict[str, Any]]) -> str:
 def generate_output_sensitivity_artifacts(raw_rows: List[Dict[str, Any]]) -> tuple[str, str]:
     """Macros and a table separating enumeration cost from construction cost.
 
-    Theorem 4.23 splits the enumeration bound into O(n(n+m)) construction plus
-    O(K) output.  On the closure family K grows cubically while the biclique
+    The enumeration bound splits into O(n(n+m)) construction plus O(K)
+    output.  On the closure family K grows cubically while the biclique
     incidence count C grows quadratically, so the per-triple and per-incidence
     costs show the two terms separately.
     """
@@ -705,7 +705,7 @@ def generate_scaling_combined_table(raw_rows: List[Dict[str, Any]],
                                     family_rows: List[Dict[str, Any]],
                                     family_experiment: str,
                                     speedup_digits: int) -> str:
-    """The paper's combined scaling table for the Proposition 5.5 family.
+    """The paper's combined scaling table for the cubic-output family.
 
     Columns 4-5 repeat the output-sensitivity split (ns per enumerated triple
     and per stored membership, from raw_rows); columns 6-9 are the fixed-seed
@@ -725,7 +725,7 @@ def generate_scaling_combined_table(raw_rows: List[Dict[str, Any]],
     closure = {k_of(str(r["benchmark"])): r for r in family_rows
                if r.get("experiment") == family_experiment}
     lines = [
-        "% Auto-generated combined scaling table for the Proposition 5.5 family",
+        "% Auto-generated combined scaling table for the cubic-output family",
         "\\begin{tabular}{@{}rrrrrrrrr@{}}",
         "\\toprule",
         "& & & \\multicolumn{2}{c}{DOD Extraction \\& Enum.} & "

@@ -57,8 +57,9 @@ DependenceResult computeCompactNTSCD(Graph &graph,
 DODBicliqueMap computeCompactDOD(Graph &graph,
                                  const Inevitability &inevitability);
 
-/// Where Algorithm 2 leaves each binary decision. Used to explain empirically
-/// why the order relation is empty on real CFGs; not used by the analysis.
+/// Where the biclique construction leaves each binary decision. Used to
+/// explain empirically why the order relation is empty on real CFGs; not used
+/// by the analysis.
 struct DODExitStats {
   size_t fewInevitable{0};  ///< |S_p| < 3, so S_p - {p} cannot hold a pair
   size_t singleEntry{0};    ///< |B1 u B2| <= 1 (no dependence before branching)

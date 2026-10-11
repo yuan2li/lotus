@@ -621,8 +621,9 @@ TEST(ControlDependenceTest, CompactDODMatchesDefinitionOnAllFourNodeGraphs) {
 }
 
 TEST(ControlDependenceTest, DODExitStatsAccountForEveryBinaryDecision) {
-  // Every binary decision leaves Algorithm 2 through exactly one counted exit,
-  // and a decision with |S_p| < 3 leaves at the inevitable-set precheck.
+  // Every binary decision leaves the biclique construction through exactly one
+  // counted exit, and a decision with |S_p| < 3 leaves at the inevitable-set
+  // precheck.
   constexpr unsigned nodeCount = 4;
   constexpr unsigned graphCount = 1u << (nodeCount * nodeCount);
   size_t fewInevitable = 0;
@@ -786,7 +787,8 @@ bool allReachableFromStart(lotus::cd::detail::Graph &graph,
 // as like-for-like, which presumes they return the same set. Nothing tested
 // that: the C++ suite only compared the compact closure against Eager-Pairs,
 // and the reference validator only compared it against explicit pair closure,
-// so both sides of every existing check were this paper's own semantics.
+// so both sides of every existing check were the compact closure's own
+// semantics.
 TEST(ControlDependenceTest, StrongAndCompactClosureAgreeOnReachableGraphs) {
   constexpr unsigned nodeCount = 4;
   constexpr unsigned graphCount = 1u << (nodeCount * nodeCount);

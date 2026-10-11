@@ -7,11 +7,11 @@ scripts for Lotus control-dependence analysis.
 
 | Script | Purpose |
 | --- | --- |
-| `evaluate_control_dependence.py` | Driver orchestration for reproducible multi-benchmark evaluation (RQ1 & RQ2). Handles warmups, randomized run orders, repetitions, cross-variant output checks, and CSV metrics emission. |
+| `evaluate_control_dependence.py` | Driver orchestration for reproducible multi-benchmark evaluation (state-of-the-art comparisons and ablations). Handles warmups, randomized run orders, repetitions, cross-variant output checks, and CSV metrics emission. |
 | `compact_dod_reference.py` | Python reference implementation of compact NTSCD, the biclique DOD construction (with the inevitable-set precheck), rooted dependency closure, and a definition-level DOD checker. Favors clarity over speed; `synthetic_family.py` builds on it. |
 | `validate_compact_dod.py` | Regression harness for the reference implementation: exhausts all four-vertex digraphs, compares compact DOD with the definition-level checker on random larger graphs, and compares compact closure with explicit fixed-point closure. `--quick` runs a smaller suite. |
-| `synthetic_family.py` | Generator and theoretical validator for the Proposition 5.1 synthetic graph family. Emits LLVM IR (`.ll`) benchmarks exhibiting cubic output ($K = k^3$) with quadratic bicliques ($C = 2k^2$). `--benchmark` writes `synthetic_benchmark_results.csv` to `--results-dir` (default `control-dependence-synthetic-results/`). |
-| `generate_paper_artifacts.py` | Post-processing pipeline. Reads `summary.csv`, aggregates statistics, and automatically generates LaTeX macros (`paper_macros.tex`, plus `closure_guard_macros.tex` comparing Full-Closure with both prior closures, guarded and unguarded, `closure_cav21_family_macros.tex` with `tab_closure_cav21_{family,sweep}.tex` for the non-empty family against the CAV'21 closure, and `shared_inevitability_macros.tex` comparing both RQ1 tasks after a shared inevitability matrix), tables (closure family, seed sweep, ablations, reducibility guard), and a three-panel TikZ figure (`fig_rq1_results.tikz`: enumeration and closure scatters plus the K/C bars). |
+| `synthetic_family.py` | Generator and theoretical validator for the cubic-output synthetic DOD family. Emits LLVM IR (`.ll`) benchmarks exhibiting cubic output ($K = k^3$) with quadratic bicliques ($C = 2k^2$). `--benchmark` writes `synthetic_benchmark_results.csv` to `--results-dir` (default `control-dependence-synthetic-results/`). |
+| `generate_paper_artifacts.py` | Post-processing pipeline. Reads `summary.csv`, aggregates statistics, and automatically generates LaTeX macros (`paper_macros.tex`, plus `closure_guard_macros.tex` comparing Full-Closure with both prior closures, guarded and unguarded, `closure_cav21_family_macros.tex` with `tab_closure_cav21_{family,sweep}.tex` for the non-empty family against the CAV'21 closure, and `shared_inevitability_macros.tex` comparing enumeration and closure after a shared inevitability matrix), tables (closure family, seed sweep, ablations, reducibility guard), and a three-panel TikZ figure (`fig_rq1_results.tikz`: enumeration and closure scatters plus the K/C bars). |
 | `sweep_closure_seeds.py` | Sweeps the closure seed-set size `|W|` over the `closure_k*.ll` family with randomly drawn seeds, reporting the speedup distribution rather than one seeding. `--sota-algorithm ntscd-dod-closure` swaps Danicic et al.'s closure for Chalupa et al.'s NTSCD and DOD closure. Emits `closure_seed_sweep{,_raw}.csv`. |
 | `function_size_distribution.py` | Re-runs the Full variants over the evaluated real-world subjects and describes the per-function CFG size distribution: size percentiles and, per size bucket, the share of functions, vertices, and Full-Enumerate/Full-Closure analysis time. Emits `function_sizes.csv`. |
 | `random_graph_family.py` | Generates the random graphs of the CAV'21 DOD evaluation (500 vertices, 50 to 1000 edges, out-degree at most two, 10 graphs per edge count) as LLVM IR, both whole (`random_m*.ll`, for enumeration) and restricted to the part reachable from the start (`random_rooted_m*.ll`, for rooted closure). `--stats` writes per-graph size, decision, biclique, and triple counts and whether the reducibility guard holds to `random_graph_stats.csv`. |
@@ -20,7 +20,7 @@ scripts for Lotus control-dependence analysis.
 ## Usage Examples
 
 ```bash
-# 1. Generate or benchmark the Proposition 5.1 synthetic family
+# 1. Generate or benchmark the cubic-output synthetic family
 python3 scripts/control_dependence/synthetic_family.py --benchmark
 python3 scripts/control_dependence/synthetic_family.py --generate-suite
 
