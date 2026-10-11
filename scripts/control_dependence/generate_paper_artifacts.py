@@ -805,9 +805,22 @@ def generate_seed_sweep_artifacts(
     Reporting one seeding is fragile: an even spread can align with a
     benchmark's block layout and land near the best case.  This summarises the
     distribution over randomly drawn seed sets instead.
+
+    A cell whose |W| reaches the instance's block count n is truncated: the
+    driver then seeds every block, so all draws in it coincide.  Such cells are
+    left out of the statistics and the table; family_rows supply n.
     """
     import statistics
 
+    blocks = {r["benchmark"]: int(r["nodes"]) for r in family_rows if r.get("nodes")}
+
+    def truncated(row: Dict[str, Any]) -> bool:
+        n = blocks.get(row["benchmark"])
+        return n is not None and int(row["seed_count"]) >= n
+
+    truncated_trials = sum(1 for r in raw if truncated(r))
+    raw = [r for r in raw if not truncated(r)]
+    summary = [r for r in summary if not truncated(r)]
     sizes = sorted({int(r["seed_count"]) for r in summary})
     non_degenerate = [r for r in raw if int(r["seed_count"]) >= 4]
     speedups = sorted(float(r["speedup"]) for r in non_degenerate)
@@ -820,15 +833,16 @@ def generate_seed_sweep_artifacts(
         + ("" if prefix == "Closure" else f" ({prefix})")
         + " by generate_paper_artifacts.py",
         f"\\newcommand{{\\{prefix}SweepTrials}}{{{len(non_degenerate)}}}",
-        f"\\newcommand{{\\{prefix}SweepMedian}}{{{median:.0f}}}",
-        f"\\newcommand{{\\{prefix}SweepQOne}}{{{q1:.0f}}}",
-        f"\\newcommand{{\\{prefix}SweepQThree}}{{{q3:.0f}}}",
+        f"\\newcommand{{\\{prefix}SweepMedian}}{{{median:.1f}}}",
+        f"\\newcommand{{\\{prefix}SweepQOne}}{{{q1:.1f}}}",
+        f"\\newcommand{{\\{prefix}SweepQThree}}{{{q3:.1f}}}",
         f"\\newcommand{{\\{prefix}SweepMin}}{{{min(speedups):.1f}}}",
         f"\\newcommand{{\\{prefix}SweepMax}}{{{max(speedups):.0f}}}",
         f"\\newcommand{{\\{prefix}SweepSizeMin}}{{{min(sizes)}}}",
         f"\\newcommand{{\\{prefix}SweepSizeMax}}{{{max(sizes)}}}",
         f"\\newcommand{{\\{prefix}SweepDrawsPerCell}}{{"
         f"{max(int(r['trials']) for r in summary)}}}",
+        f"\\newcommand{{\\{prefix}SweepTruncatedTrials}}{{{truncated_trials}}}",
     ]
     # Compare each instance's fixed seeding (the closure-family table) with the
     # random draws of the same size, so "favourable end" is checked per instance
