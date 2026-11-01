@@ -5,10 +5,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-// Provide pipe2 only on macOS (not in older SDKs); Linux/glibc has it in
-// unistd.h
+// macOS lacks pipe2 in older SDKs and declares it in newer ones, so use a
+// differently named fallback there; Linux/glibc has pipe2 in unistd.h.
 #if defined(__APPLE__)
-static int pipe2(int fd[2], int flags) {
+static int nonblockingPipe(int fd[2], int flags) {
   if (pipe(fd) < 0)
     return -1;
   if (flags & O_NONBLOCK) {
@@ -17,12 +17,14 @@ static int pipe2(int fd[2], int flags) {
   }
   return 0;
 }
+#else
+static int nonblockingPipe(int fd[2], int flags) { return pipe2(fd, flags); }
 #endif
 
 namespace fitx {
 struct EndPoints EndPoint::createEndPointPair() {
   int fd[2];
-  if (pipe2(fd, O_NONBLOCK) < 0) {
+  if (nonblockingPipe(fd, O_NONBLOCK) < 0) {
     return EndPoints();
   }
 
