@@ -96,6 +96,7 @@ QueryScanResult QueryEngine::runToSinks(const Query &q) const {
   scan.productStates = result.productStates;
   scan.edgesExamined = result.edgesExamined;
   scan.summaryPairs = result.summaryPairs;
+  scan.pushes = result.pushes;
   scan.message = std::move(result.message);
   return scan;
 }
@@ -235,7 +236,7 @@ QueryResult QueryEngine::runImpl(const Query &q, QueryScanResult *scan) const {
       for (ID root : roots)
         insert({root, 0, false, false}, InvalidID, InvalidID);
       while (!queue.empty()) {
-        ID id = queue.front(); queue.pop_front();
+        ID id = queue.front(); queue.pop_front(); ++result.pushes;
         ContextState current = states[id];
         ProductNode productNode = pn[current.product];
         if (sinks[productNode.node] && accepts[productNode.state] &&
@@ -395,6 +396,7 @@ QueryResult QueryEngine::runImpl(const Query &q, QueryScanResult *scan) const {
       while (!queue.empty()) {
         ID id = queue.front();
         queue.pop_front();
+        ++result.pushes;
         Fact fact = facts[id];
         for (ID edgeID : pout[fact.node]) {
           const auto &e = pe[edgeID];
@@ -448,7 +450,7 @@ QueryResult QueryEngine::runImpl(const Query &q, QueryScanResult *scan) const {
   ID accepted = InvalidID;
   std::map<FlowNodeID, ID> acceptedSinks;
   while (!queue.empty()) {
-    ID s = queue.front(); queue.pop_front();
+    ID s = queue.front(); queue.pop_front(); ++result.pushes;
     ID p = s / 4; unsigned phase = (s % 4) / 2; bool positive = s % 2;
     if (sinks[pn[p].node] && accepts[pn[p].state] && validSink(pn[p].node) &&
         (!q.requireNonEmpty || positive)) {

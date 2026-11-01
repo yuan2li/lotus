@@ -110,6 +110,10 @@ struct FlowStatistics {
   std::size_t historyNodes = 0, historyPsiNodes = 0, historyPhiNodes = 0;
   std::size_t flowEdges = 0, guardedEffects = 0;
   std::size_t knownObjectCardinality = 0, unknownObjectSets = 0;
+  /// Object count k of each known guarded-effect set other than allocations
+  /// and opens (the alias multiplicity at a relevant use); unknown guards are
+  /// counted in unknownObjectSets.
+  std::vector<std::size_t> effectGuardSizes;
 };
 
 /// Non-mutating overlay: history edges encode temporal uses; imported SVFG

@@ -374,6 +374,7 @@ ObjectBatchResult QueryEngine::runObjects(const ObjectBatchQuery &request) const
     }
     while (!pending.empty()) {
       Delta delta = std::move(pending.front()); pending.pop_front();
+      stats.recordPushes(1, delta.objects->count());
       expand(delta.id);
       if (omittedThreads[delta.id] != emptyMask)
         unite(incomplete, intersect(delta.objects, omittedThreads[delta.id]));
@@ -507,6 +508,7 @@ ObjectBatchResult QueryEngine::runObjects(const ObjectBatchQuery &request) const
         ID id = queue.front();
         queue.pop_front();
         Delta delta{id, std::move(queued[id]), false, queuedProof[id]};
+        stats.recordPushes(1, delta.objects->count());
         queued[id] = emptyMask;
         queuedProof[id] = InvalidID;
         ContextState current = states[delta.id];
@@ -638,6 +640,7 @@ ObjectBatchResult QueryEngine::runObjects(const ObjectBatchQuery &request) const
       }
       while (!queue.empty()) {
         Delta d = std::move(queue.front()); queue.pop_front();
+        stats.recordPushes(1, d.objects->count());
         ID entry = facts[d.id].from, node = facts[d.id].to;
         for (auto edgeID : pout[node]) {
           const auto &edge = pe[edgeID];
@@ -684,6 +687,7 @@ ObjectBatchResult QueryEngine::runObjects(const ObjectBatchQuery &request) const
   for (const auto &root : roots) push(root.first * 4, root.second);
   while (!queue.empty()) {
     Delta d = std::move(queue.front()); queue.pop_front();
+    stats.recordPushes(1, d.objects->count());
     ID p = d.id / 4; unsigned phase = (d.id % 4) / 2; bool positive = d.id % 2;
     if (sinks[pn[p].node] && accepts[pn[p].state] && (!q.requireNonEmpty || positive)) {
       accept(pn[p].node, d);

@@ -43,6 +43,8 @@ struct DefectScan {
   SearchCompletion completion;
   std::vector<DefectReport> findings;
   ObjectBatchStatistics statistics;
+  /// Status of every candidate object, across all sinks.
+  std::map<ObjectID, QueryStatus> objectStatus;
   bool exhaustive = true;
   double searchMilliseconds = 0, reportingMilliseconds = 0;
   std::string message;

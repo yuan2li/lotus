@@ -85,8 +85,12 @@ DefectScan DefectDetector::scan(DefectKind kind) const {
         scan.findings[it->second].objects.push_back(object);
       }
     }
-    if (!lane.foundAt.empty()) ++scan.statistics.foundObjects;
-    else if (lane.status == QueryStatus::Unknown) ++scan.statistics.unknownObjects;
+    auto status = !lane.foundAt.empty() ? QueryStatus::Found
+                  : lane.status == QueryStatus::Unknown ? QueryStatus::Unknown
+                                                        : QueryStatus::NotFound;
+    scan.objectStatus.emplace(object, status);
+    if (status == QueryStatus::Found) ++scan.statistics.foundObjects;
+    else if (status == QueryStatus::Unknown) ++scan.statistics.unknownObjects;
     else ++scan.statistics.notFoundObjects;
   }
   std::sort(scan.findings.begin(), scan.findings.end(), [&](const DefectReport &a,

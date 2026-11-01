@@ -28,6 +28,13 @@ void expectFixedMatchesBatch(const TraceFlowGraph &graph, DefectKind kind) {
     EXPECT_EQ(fixed.statistics.foundObjects, batch.statistics.foundObjects);
     EXPECT_EQ(fixed.statistics.notFoundObjects, batch.statistics.notFoundObjects);
     EXPECT_EQ(fixed.statistics.unknownObjects, batch.statistics.unknownObjects);
+    EXPECT_EQ(fixed.objectStatus, batch.objectStatus);
+    EXPECT_EQ(fixed.objectStatus.size(), batch.statistics.candidateObjects);
+    // Proposition 5.2 counts the batch's pushed object bits R. A fixed-object
+    // search may stop once every sink is accepted, so it pushes at most R.
+    EXPECT_LE(fixed.statistics.pushes, batch.statistics.pushedObjectBits);
+    EXPECT_GT(fixed.statistics.pushes, 0u);
+    EXPECT_EQ(fixed.statistics.pushedObjectBits, fixed.statistics.pushes);
     ASSERT_EQ(fixed.findings.size(), batch.findings.size());
     for (std::size_t i = 0; i < fixed.findings.size(); ++i) {
       EXPECT_EQ(fixed.findings[i].sink, batch.findings[i].sink);

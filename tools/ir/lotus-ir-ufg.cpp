@@ -1,6 +1,7 @@
 #include "IR/ICFG/ICFGBuilder.h"
 #include "IR/SVFG/SVFGBuilder.h"
 #include "IR/UFG/DefectDetector.h"
+#include "IR/UseTraceSSA/ResultExport.h"
 #include "IR/UseTraceSSA/SVFGBridge.h"
 #include "IR/UseTraceSSA/TraceQueryOptions.h"
 
@@ -14,6 +15,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -54,6 +56,18 @@ llvm::cl::opt<std::string> ObjectGranularity(
     llvm::cl::desc("Resource objects: site (merge per allocation site) or "
                    "abstract (SVFG object IDs)"),
     llvm::cl::init("site"));
+llvm::cl::opt<std::string> ResultsJSON(
+    "results-json",
+    llvm::cl::desc("With --check, write per-object statuses and findings "
+                   "deduplicated by sink site to this JSON file"),
+    llvm::cl::init(""));
+llvm::cl::opt<bool> ResultsWitnesses(
+    "results-witnesses",
+    llvm::cl::desc("Include one witness path with source locations per site "
+                   "in --results-json"));
+llvm::cl::opt<bool> FullLabels(
+    "full-labels",
+    llvm::cl::desc("Capture exact LLVM instruction labels even with --quiet"));
 llvm::cl::opt<bool> Quiet("quiet",
                            llvm::cl::desc("Suppress issue and witness details"));
 cli::QueryOptionsParser QueryOptionFlags;
@@ -83,7 +97,9 @@ std::string findingSite(const FlowNode &node) {
   const std::string function = label.substr(0, functionEnd);
   if (!node.sourceLocation.empty())
     return function + ':' + node.sourceLocation;
-  return label;
+  // History versions differ between graph configurations; keep the site text.
+  const auto space = label.find(' ');
+  return space == std::string::npos ? label : function + ':' + label.substr(space + 1);
 }
 } // namespace
 
@@ -164,6 +180,9 @@ int main(int argc, char **argv) {
                              Check == "file-leak" ? NativeHistoryMode::FileLeak :
                                                           NativeHistoryMode::Full;
     NativeHistoryOptions historyOptions;
+    // Same labels as lotus-ir-usetracessa: --quiet checks skip printing the
+    // module, and finding sites stay comparable across the two tools.
+    historyOptions.instructionText = Check.empty() || !Quiet || FullLabels;
     historyOptions.allocationSiteObjects = ObjectGranularity == "site";
     auto result =
         buildUseTraceSSAFromLotusSVFG(*svfg, *module, mode, historyOptions);
@@ -258,10 +277,10 @@ int main(int argc, char **argv) {
         cli::printCompletion(std::cout, scan.completion);
         std::cout << '\n';
         const auto &qs = scan.statistics;
-        std::cout << "lane_product_states=" << qs.productStates
-                  << " lane_product_edges=" << qs.productEdges
+        std::cout << "product_states=" << qs.productStates
+                  << " product_edges=" << qs.productEdges
                   << " edges_examined=" << qs.edgesExamined
-                  << " summary_facts=" << qs.summaryPairs
+                  << " summary_pairs=" << qs.summaryPairs
                   << " candidate_objects=" << qs.candidateObjects
                   << " found_objects=" << qs.foundObjects
                   << " notfound_objects=" << qs.notFoundObjects
@@ -299,6 +318,29 @@ int main(int argc, char **argv) {
             std::cout << "witness_node=" << node << '\n';
       }
     }
+    if (checkReport && !ResultsJSON.empty()) {
+      std::ofstream out(ResultsJSON);
+      if (!out) throw std::runtime_error("cannot write " + ResultsJSON);
+      std::function<std::vector<cli::WitnessStep>(std::size_t)> witnessOf;
+      if (ResultsWitnesses)
+        witnessOf = [&](std::size_t index) {
+          std::vector<cli::WitnessStep> steps;
+          for (auto id : checkReport->findings[index].result.nodes) {
+            const auto &node = expanded.graph().node(id);
+            steps.emplace_back(node.label, node.sourceLocation);
+          }
+          return steps;
+        };
+      cli::writeResultsJSON(
+          out, "ufg", Check, {{"object_granularity", ObjectGranularity}},
+          *checkReport,
+          [&](std::size_t index) {
+            const auto &nodes = checkReport->findings[index].result.nodes;
+            return nodes.empty() ? std::string("unknown")
+                                 : findingSite(expanded.graph().node(nodes.back()));
+          },
+          witnessOf);
+    }
     if (Timing) {
       auto millis = [](Clock::time_point from, Clock::time_point to) {
         return std::chrono::duration<double, std::milli>(to - from).count();
@@ -309,7 +351,9 @@ int main(int argc, char **argv) {
                 << " shared_temporal=" << millis(builtSVFG, builtShared)
                 << " ufg_expand=" << millis(builtShared, builtHistory)
                 << " ufg=" << millis(builtSVFG, builtHistory)
+                << " build=" << millis(builtSVFG, builtHistory)
                 << " check=" << millis(builtHistory, analyzed)
+                << " analysis=" << millis(builtSVFG, analyzed)
                 << " total=" << millis(start, analyzed) << '\n';
     }
     cli::explainIncomplete(std::cerr, completion);
