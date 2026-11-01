@@ -19,6 +19,8 @@ Outputs (in --out-dir):
     rq1_time.csv      Figure 5: analysis seconds per program, client and tool
     pta_ablation.csv  Andersen vs flow-sensitive points-to (--ptas): universe, k,
                       sigma, findings and time for UseTraceSSA and UFG
+    object_scope.csv  heap-only vs every points-to object (--object-scopes): the
+                      same columns plus the excluded non-heap objects
     push_sizes.csv    |New_i| histogram per program and client (power-of-two buckets)
     guard_k.csv       alias multiplicity k histogram per program and client
 
@@ -34,13 +36,13 @@ import statistics
 import sys
 
 CONFIG_KEYS = ("benchmark", "tool", "bug_type", "smt_mode", "object_mode",
-               "temporal_graph", "object_granularity", "svfg_mssa", "pta")
+               "temporal_graph", "object_granularity", "svfg_mssa", "pta", "object_scope")
 METRICS = ("analysis_ms", "total_ms", "check_ms", "build_ms", "parse_ms", "svfg_ms", "pta_ms",
            "max_rss_mb", "wall_time_s", "findings", "finding_sites",
            "product_states", "product_edges", "summary_pairs", "pushes",
            "pushed_object_bits", "sigma", "candidate_objects", "found_objects",
            "history_nodes", "history_psi", "history_phi", "ufg_nodes",
-           "guard_k_count", "guard_k_mean", "guard_k_median", "guard_k_p90", "guard_k_max",
+           "excluded_nonheap_objects", "guard_k_count", "guard_k_mean", "guard_k_median", "guard_k_p90", "guard_k_max",
            "icfg_nodes", "ir_instructions", "ir_blocks", "ir_functions")
 HISTOGRAMS = ("push_sizes", "guard_k_hist")
 FRACTIONAL = ("sigma", "guard_k_mean", "max_rss_mb")
@@ -106,8 +108,11 @@ def find(rows, benchmark, bug_type, tool, **config):
                 continue
             if tool != "saber" and row["svfg_mssa"] not in (None, config.get("svfg_mssa", "auto")):
                 continue
-            # Records from before the ablation have no pta field.
+            # Records from before the ablation / heap filter have no such field.
             if tool != "saber" and row.get("pta") not in (None, config.get("pta", "andersen")):
+                continue
+            if tool != "saber" and row.get("object_scope") not in (
+                    None, config.get("object_scope", "heap")):
                 continue
             return row
     return None
@@ -165,7 +170,7 @@ def main():
     pairs = sorted({(row["benchmark"], row["bug_type"]) for row in rows.values()},
                    key=lambda pair: (pair[0], list(CLIENTS).index(pair[1])
                                      if pair[1] in CLIENTS else 99))
-    table2, table4, table5, times, pushes, guards, ablation = [], [], [], [], [], [], []
+    table2, table4, table5, times, pushes, guards, ablation, scopes = ([] for _ in range(8))
     for benchmark, bug_type in pairs:
         client = CLIENTS.get(bug_type, bug_type)
         saber = find(rows, benchmark, bug_type, "saber")
@@ -213,6 +218,19 @@ def main():
                                  cell(row, "sigma"), cell(row, "findings"),
                                  cell(row, "finding_sites"), cell(row, "product_states"),
                                  cell(row, "pta_ms", 1000, 3), cell(row, "analysis_ms", 1000, 3)])
+        for tool in ("usetracessa", "ufg"):
+            every = find(rows, benchmark, bug_type, tool, object_scope="all")
+            if every is None:
+                continue
+            heap = find(rows, benchmark, bug_type, tool)
+            for scope, row in (("heap", heap), ("all", every)):
+                scopes.append([benchmark, client, tool, scope,
+                               cell(row, "candidate_objects"),
+                               cell(row, "excluded_nonheap_objects"),
+                               cell(row, "guard_k_mean"), cell(row, "guard_k_p90"),
+                               cell(row, "guard_k_max"), cell(row, "sigma"),
+                               cell(row, "findings"), cell(row, "finding_sites"),
+                               cell(row, "product_states"), cell(row, "analysis_ms", 1000, 3)])
         if utssa and utssa.get("push_sizes"):
             pushes += [[benchmark, client, 2 ** bucket, count]
                        for bucket, count in enumerate(utssa["push_sizes"])]
@@ -241,6 +259,10 @@ def main():
               ["program", "client", "tool", "pta", "universe", "mean_k", "p90_k", "max_k",
                "sigma", "findings", "finding_sites", "product_states", "pta_time_s",
                "analysis_time_s"], ablation)
+    write_csv(out / "object_scope.csv",
+              ["program", "client", "tool", "scope", "universe", "excluded_nonheap",
+               "mean_k", "p90_k", "max_k", "sigma", "findings", "finding_sites",
+               "product_states", "analysis_time_s"], scopes)
     write_csv(out / "push_sizes.csv", ["program", "client", "bucket_min", "pushes"], pushes)
     write_csv(out / "guard_k.csv", ["program", "client", "bucket_min", "sites"], guards)
     print(f"{len(rows)} configurations, {len(pairs)} program/client pairs -> {out}")
