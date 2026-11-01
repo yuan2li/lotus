@@ -19,9 +19,12 @@
 #include "Checker/Tooling/CheckerReport.h"
 #include "Utils/LLVM/RecursiveTimer.h"
 
+#include <chrono>
+
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
+#include <llvm/Support/Format.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -39,6 +42,19 @@ static cl::opt<std::string>
     InputFilename(cl::Positional, cl::desc("<input bitcode file>"),
                   cl::Required,
                   cl::sub(lotus::checker::tooling::saberSubCommand()));
+
+static cl::opt<bool> SaberTiming(
+    "saber.timing",
+    cl::desc("Build the SVFG once before the checkers and print "
+             "'timing_ms parse= svfg= check= total=' to stderr"),
+    cl::init(false), cl::sub(lotus::checker::tooling::saberSubCommand()));
+
+namespace {
+using TimingClock = std::chrono::steady_clock;
+double elapsedMs(TimingClock::time_point from, TimingClock::time_point to) {
+  return std::chrono::duration<double, std::milli>(to - from).count();
+}
+} // namespace
 
 int runSaberCheckerTool(const char *argv0) {
   (void)lotus::checker::tooling::statsEnabled();
@@ -63,9 +79,11 @@ int runSaberCheckerTool(const char *argv0) {
   (void)&lotus::analysis::SaberValidateTests;
   (void)&lotus::analysis::SaberCollectExtRetGlobals;
 
+  const auto started = TimingClock::now();
   LLVMContext Context;
   SMDiagnostic Err;
   std::unique_ptr<Module> M = parseIRFile(InputFilename, Err, Context);
+  const auto parsed = TimingClock::now();
   if (!M) {
     Err.print(argv0, errs());
     return lotus::checker::tooling::EXIT_ERROR;
@@ -97,7 +115,9 @@ int runSaberCheckerTool(const char *argv0) {
   std::unique_ptr<::ICFG> shared_icfg;
   lotus::analysis::SrcSnkDDA::RemovedSUVFEdges shared_removed_su_vfg_edges;
 
-  if (checkerCount > 1 || runUAF) {
+  // Timing separates graph construction from checking, so it always uses the
+  // shared-graph path that multi-checker runs take.
+  if (checkerCount > 1 || runUAF || SaberTiming) {
     // Build SVFG/ICFG once using a temporary checker
     outs() << "\n=== Building SVFG (shared across checkers) ===\n";
     SaberGraphOnlyBuilder builderChecker;
@@ -110,6 +130,8 @@ int runSaberCheckerTool(const char *argv0) {
     shared_svfg = std::move(extracted.first);
     shared_icfg = std::move(extracted.second);
   }
+
+  const auto builtGraph = TimingClock::now();
 
   // Run each checker
   if (runUAF) {
@@ -126,7 +148,7 @@ int runSaberCheckerTool(const char *argv0) {
       outs() << "Running Memory Leak checker...\n";
     }
     lotus::analysis::LeakChecker leakChecker;
-    if (checkerCount > 1 && shared_svfg && shared_icfg) {
+    if (shared_svfg && shared_icfg) {
       // Move shared graphs into this checker.
       leakChecker.setSharedSVFGAndICFG(std::move(shared_svfg),
                                        std::move(shared_icfg));
@@ -150,7 +172,7 @@ int runSaberCheckerTool(const char *argv0) {
       outs() << "Running Double Free checker...\n";
     }
     lotus::analysis::DoubleFreeChecker dfChecker;
-    if (checkerCount > 1 && shared_svfg && shared_icfg) {
+    if (shared_svfg && shared_icfg) {
       dfChecker.setSharedSVFGAndICFG(std::move(shared_svfg),
                                      std::move(shared_icfg));
       dfChecker.importRemovedSUVFEdges(shared_removed_su_vfg_edges);
@@ -174,7 +196,7 @@ int runSaberCheckerTool(const char *argv0) {
       outs() << "Running File Descriptor checker...\n";
     }
     lotus::analysis::FileChecker fileChecker;
-    if (checkerCount > 1 && shared_svfg && shared_icfg) {
+    if (shared_svfg && shared_icfg) {
       fileChecker.setSharedSVFGAndICFG(std::move(shared_svfg),
                                        std::move(shared_icfg));
       fileChecker.importRemovedSUVFEdges(shared_removed_su_vfg_edges);
@@ -182,6 +204,13 @@ int runSaberCheckerTool(const char *argv0) {
     fileChecker.setModule(M.get());
     fileChecker.runOnModule(*M);
   }
+
+  const auto checked = TimingClock::now();
+  if (SaberTiming)
+    errs() << "timing_ms parse=" << format("%.3f", elapsedMs(started, parsed))
+           << " svfg=" << format("%.3f", elapsedMs(parsed, builtGraph))
+           << " check=" << format("%.3f", elapsedMs(builtGraph, checked))
+           << " total=" << format("%.3f", elapsedMs(started, checked)) << "\n";
 
   // Print bug report summary
   stats.emit();
