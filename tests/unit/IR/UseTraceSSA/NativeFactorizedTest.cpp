@@ -394,6 +394,15 @@ TEST(UseTraceSSANative, AllocationSiteGranularityMergesAbstractCopies) {
                                              abstractObjects);
   EXPECT_EQ(split.graph.resourceCandidates(), std::vector<ObjectID>({10, 11, 12}));
   EXPECT_TRUE(DefectDetector(split.graph, 3).scan(DefectKind::DoubleFree).findings.empty());
+
+  // Keys name the allocation by position and the field path, not by ID; the
+  // unbound copy shares the canonical object's key.
+  StableObjectKeys keys(svfg, *module);
+  EXPECT_EQ(keys(10), "site:0");
+  EXPECT_EQ(keys(11), "site:0");
+  EXPECT_EQ(keys(12), "site:0+8");
+  EXPECT_EQ(keys(99), "id:99");
+  EXPECT_EQ(keys((ObjectID(1) << 63) + 2), "synthetic:2");
 }
 
 TEST(UseTraceSSANative, UnknownSourceKeepsNamedObjectCandidates) {

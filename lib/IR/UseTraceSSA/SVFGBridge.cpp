@@ -17,6 +17,7 @@
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
@@ -840,6 +841,55 @@ SVFGHistoryResult buildUseTraceSSAFromLotusSVFG(const analysis::SVFG &svfg,
   timer.finish("usetracessa_import");
   appendTemporalFacts(result, svfg, layouts, nextFunction, plan, options);
   return result;
+}
+
+StableObjectKeys::StableObjectKeys(const analysis::SVFG &svfg,
+                                   const llvm::Module &module)
+    : Svfg(svfg) {
+  for (const auto &global : module.globals())
+    Positions.emplace(&global, "@" + global.getName().str());
+  for (const auto &function : module) {
+    const std::string name = function.getName().str();
+    Positions.emplace(&function, "@" + name);
+    for (const auto &argument : function.args())
+      Positions.emplace(&argument, name + ":arg" + std::to_string(argument.getArgNo()));
+    std::size_t index = 0;
+    for (const auto &instruction : llvm::instructions(function))
+      Positions.emplace(&instruction, name + ":" + std::to_string(index++));
+  }
+}
+
+const llvm::Value *StableObjectKeys::allocation(ObjectID object,
+                                                std::string *path) const {
+  if (object >= ObjectID(1) << 63) return nullptr;
+  auto root = static_cast<std::uint32_t>(object);
+  for (unsigned depth = 0; depth < 64; ++depth) {
+    const auto *info = Svfg.getObjectInfo(root);
+    if (!info || info->baseObjId == 0 || info->baseObjId == root) break;
+    if (path && info->isFieldInsensitive) *path = "*" + *path;
+    else if (path && info->hasFieldOffset)
+      *path = "+" + std::to_string(info->fieldOffset) + *path;
+    root = info->baseObjId;
+  }
+  const llvm::Value *site = Svfg.getObjectValue(root);
+  return site ? site->stripPointerCasts() : nullptr;
+}
+
+std::string StableObjectKeys::operator()(ObjectID object) const {
+  // Synthetic exit objects are numbered in module order by the bridge.
+  constexpr ObjectID synthetic = ObjectID(1) << 63;
+  if (object >= synthetic) return "synthetic:" + std::to_string(object - synthetic);
+  std::string path;
+  auto position = Positions.find(allocation(object, &path));
+  if (position == Positions.end()) return "id:" + std::to_string(object);
+  return position->second + path;
+}
+
+std::string StableObjectKeys::location(ObjectID object) const {
+  const auto *instruction = llvm::dyn_cast_or_null<llvm::Instruction>(allocation(object));
+  const auto &debug = instruction ? instruction->getDebugLoc() : llvm::DebugLoc();
+  if (!debug) return "";
+  return debug->getFilename().str() + ":" + std::to_string(debug.getLine());
 }
 
 } // namespace usetracessa
