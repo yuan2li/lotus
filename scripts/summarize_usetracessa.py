@@ -13,7 +13,8 @@ Saber without SMT, and UseTraceSSA batch search on the sparse graph
 Outputs (in --out-dir):
     runs.csv          every configuration with medians and run counts
     table2.csv/.tex   RQ1: per program and client, Saber / UFG / UseTraceSSA
-    table4.csv/.tex   RQ2: CFG nodes, UseTraceSSA nodes, D_temporal, mean k, D_alias
+    table4.csv/.tex   RQ2: CFG nodes, UseTraceSSA nodes, D_temporal, k distribution
+                      (median, P90, max, mean), sigma, D_alias
     table5.csv/.tex   RQ3: fixed vs batch pushes, summaries, time, sigma, IDE-ICFG time
     rq1_time.csv      Figure 5: analysis seconds per program, client and tool
     push_sizes.csv    |New_i| histogram per program and client (power-of-two buckets)
@@ -37,7 +38,7 @@ METRICS = ("analysis_ms", "total_ms", "check_ms", "build_ms", "parse_ms", "svfg_
            "product_states", "product_edges", "summary_pairs", "pushes",
            "pushed_object_bits", "sigma", "candidate_objects", "found_objects",
            "history_nodes", "history_psi", "history_phi", "ufg_nodes",
-           "guard_k_count", "guard_k_mean", "guard_k_median", "guard_k_max",
+           "guard_k_count", "guard_k_mean", "guard_k_median", "guard_k_p90", "guard_k_max",
            "icfg_nodes", "ir_instructions", "ir_blocks", "ir_functions")
 HISTOGRAMS = ("push_sizes", "guard_k_hist")
 FRACTIONAL = ("sigma", "guard_k_mean", "max_rss_mb")
@@ -179,7 +180,9 @@ def main():
             table4.append([benchmark, client, cell(utssa, "ir_instructions"),
                            cell(utssa, "history_nodes"),
                            ratio(utssa.get("ir_instructions"), utssa.get("history_nodes")),
-                           cell(utssa, "guard_k_mean"),
+                           cell(utssa, "guard_k_median"), cell(utssa, "guard_k_p90"),
+                           cell(utssa, "guard_k_max"), cell(utssa, "guard_k_mean"),
+                           cell(utssa, "sigma"),
                            ratio(ufg and ufg["status"] == "OK" and ufg.get("product_states"),
                                  utssa.get("product_states"))])
         if utssa or fixed:
@@ -205,8 +208,8 @@ def main():
              "utssa_time_s"]
     write_csv(out / "table2.csv", head2, table2)
     write_tex(out / "table2.tex", table2)
-    head4 = ["program", "client", "cfg_nodes", "utssa_nodes", "d_temporal", "mean_k",
-             "d_alias_states"]
+    head4 = ["program", "client", "cfg_nodes", "utssa_nodes", "d_temporal", "median_k",
+             "p90_k", "max_k", "mean_k", "sigma", "d_alias_states"]
     write_csv(out / "table4.csv", head4, table4)
     write_tex(out / "table4.tex", table4)
     head5 = ["program", "client", "universe", "fixed_pushes", "fixed_summaries",

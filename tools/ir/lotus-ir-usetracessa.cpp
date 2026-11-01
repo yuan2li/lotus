@@ -291,6 +291,8 @@ int main(int argc, char **argv) {
                 << (guards.empty() ? 0.0 : double(guardTotal) / guards.size())
                 << " guard_k_median="
                 << (guards.empty() ? 0 : guards[guards.size() / 2])
+                << " guard_k_p90="
+                << (guards.empty() ? 0 : guards[(9 * guards.size() + 9) / 10 - 1])
                 << " guard_k_max=" << (guards.empty() ? 0 : guards.back())
                 << " guard_k_hist=";
       for (std::size_t bucket = 0; bucket < guardHistogram.size(); ++bucket)
