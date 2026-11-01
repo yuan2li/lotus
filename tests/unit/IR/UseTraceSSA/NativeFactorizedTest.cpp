@@ -579,6 +579,7 @@ TEST(UseTraceSSANative, AllocationSiteGranularityMergesAbstractCopies) {
   EXPECT_EQ(keys(12), "site:0+8");
   EXPECT_EQ(keys(99), "id:99");
   EXPECT_EQ(keys((ObjectID(1) << 63) + 2), "synthetic:2");
+  EXPECT_EQ(keys(UnknownResource), "unknown");
 }
 
 TEST(UseTraceSSANative, UnknownSourceKeepsNamedObjectCandidates) {

@@ -968,6 +968,7 @@ const llvm::Value *StableObjectKeys::allocation(ObjectID object,
 }
 
 std::string StableObjectKeys::operator()(ObjectID object) const {
+  if (object == UnknownResource) return "unknown";
   // Synthetic exit objects are numbered in module order by the bridge.
   constexpr ObjectID synthetic = ObjectID(1) << 63;
   if (object >= synthetic) return "synthetic:" + std::to_string(object - synthetic);
