@@ -17,6 +17,8 @@ Outputs (in --out-dir):
                       (median, P90, max, mean), sigma, D_alias
     table5.csv/.tex   RQ3: fixed vs batch pushes, summaries, time, sigma, IDE-ICFG time
     rq1_time.csv      Figure 5: analysis seconds per program, client and tool
+    pta_ablation.csv  Andersen vs flow-sensitive points-to (--ptas): universe, k,
+                      sigma, findings and time for UseTraceSSA and UFG
     push_sizes.csv    |New_i| histogram per program and client (power-of-two buckets)
     guard_k.csv       alias multiplicity k histogram per program and client
 
@@ -32,8 +34,8 @@ import statistics
 import sys
 
 CONFIG_KEYS = ("benchmark", "tool", "bug_type", "smt_mode", "object_mode",
-               "temporal_graph", "object_granularity", "svfg_mssa")
-METRICS = ("analysis_ms", "total_ms", "check_ms", "build_ms", "parse_ms", "svfg_ms",
+               "temporal_graph", "object_granularity", "svfg_mssa", "pta")
+METRICS = ("analysis_ms", "total_ms", "check_ms", "build_ms", "parse_ms", "svfg_ms", "pta_ms",
            "max_rss_mb", "wall_time_s", "findings", "finding_sites",
            "product_states", "product_edges", "summary_pairs", "pushes",
            "pushed_object_bits", "sigma", "candidate_objects", "found_objects",
@@ -104,6 +106,9 @@ def find(rows, benchmark, bug_type, tool, **config):
                 continue
             if tool != "saber" and row["svfg_mssa"] not in (None, config.get("svfg_mssa", "auto")):
                 continue
+            # Records from before the ablation have no pta field.
+            if tool != "saber" and row.get("pta") not in (None, config.get("pta", "andersen")):
+                continue
             return row
     return None
 
@@ -160,7 +165,7 @@ def main():
     pairs = sorted({(row["benchmark"], row["bug_type"]) for row in rows.values()},
                    key=lambda pair: (pair[0], list(CLIENTS).index(pair[1])
                                      if pair[1] in CLIENTS else 99))
-    table2, table4, table5, times, pushes, guards = [], [], [], [], [], []
+    table2, table4, table5, times, pushes, guards, ablation = [], [], [], [], [], [], []
     for benchmark, bug_type in pairs:
         client = CLIENTS.get(bug_type, bug_type)
         saber = find(rows, benchmark, bug_type, "saber")
@@ -196,6 +201,18 @@ def main():
         times.append([benchmark, client, cell(saber, "analysis_ms", 1000, 3),
                       cell(ufg, "analysis_ms", 1000, 3), cell(utssa, "analysis_ms", 1000, 3),
                       cell(fixed, "analysis_ms", 1000, 3), cell(icfg, "analysis_ms", 1000, 3)])
+        for tool in ("usetracessa", "ufg"):
+            fspta = find(rows, benchmark, bug_type, tool, pta="fspta")
+            if fspta is None:
+                continue
+            base = find(rows, benchmark, bug_type, tool)
+            for pta, row in (("andersen", base), ("fspta", fspta)):
+                ablation.append([benchmark, client, tool, pta,
+                                 cell(row, "candidate_objects"), cell(row, "guard_k_mean"),
+                                 cell(row, "guard_k_p90"), cell(row, "guard_k_max"),
+                                 cell(row, "sigma"), cell(row, "findings"),
+                                 cell(row, "finding_sites"), cell(row, "product_states"),
+                                 cell(row, "pta_ms", 1000, 3), cell(row, "analysis_ms", 1000, 3)])
         if utssa and utssa.get("push_sizes"):
             pushes += [[benchmark, client, 2 ** bucket, count]
                        for bucket, count in enumerate(utssa["push_sizes"])]
@@ -220,6 +237,10 @@ def main():
     write_tex(out / "table5.tex", table5)
     write_csv(out / "rq1_time.csv", ["program", "client", "saber", "ufg", "utssa",
                                      "utssa_fixed", "ide_icfg"], times)
+    write_csv(out / "pta_ablation.csv",
+              ["program", "client", "tool", "pta", "universe", "mean_k", "p90_k", "max_k",
+               "sigma", "findings", "finding_sites", "product_states", "pta_time_s",
+               "analysis_time_s"], ablation)
     write_csv(out / "push_sizes.csv", ["program", "client", "bucket_min", "pushes"], pushes)
     write_csv(out / "guard_k.csv", ["program", "client", "bucket_min", "sites"], guards)
     print(f"{len(rows)} configurations, {len(pairs)} program/client pairs -> {out}")
