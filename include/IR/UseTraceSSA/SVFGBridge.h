@@ -6,6 +6,8 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
+#include <unordered_map>
 #include <utility>
 
 namespace lotus {
@@ -39,6 +41,26 @@ struct NativeHistoryOptions {
 SVFGHistoryResult buildUseTraceSSAFromLotusSVFG(
     const analysis::SVFG &svfg, const llvm::Module &module,
     NativeHistoryMode mode, NativeHistoryOptions options = {});
+
+/// Run-independent names for the objects of buildUseTraceSSAFromLotusSVFG.
+/// SVFG object IDs depend on the order in which the pointer analysis
+/// materializes objects, which may vary between processes; a key names the
+/// allocation value by position (global name, function and instruction index,
+/// or function argument) plus the field path from it ("+offset" for a field,
+/// "*" for a field-insensitive copy). Distinct objects may share a key.
+class StableObjectKeys {
+public:
+  StableObjectKeys(const analysis::SVFG &svfg, const llvm::Module &module);
+  std::string operator()(ObjectID object) const;
+  /// Source location ("file:line") of the object's allocation, or empty.
+  std::string location(ObjectID object) const;
+
+private:
+  const llvm::Value *allocation(ObjectID object, std::string *path = nullptr) const;
+
+  const analysis::SVFG &Svfg;
+  std::unordered_map<const llvm::Value *, std::string> Positions;
+};
 
 /// Copy metadata carried by a Lotus SVFG edge. The caller assigns an ID and
 /// supplies the exact consumer site (or marks a genuine boundary). Empty

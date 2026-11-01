@@ -42,13 +42,17 @@ inline const char *statusText(QueryStatus status) {
 /// Machine-readable check results for the differential oracle and manual
 /// sampling: per-object statuses, and findings deduplicated by sink site with
 /// the union of their objects. siteOf names a finding's sink site; witnessOf,
-/// when set, returns the witness of a finding (called once per site).
+/// when set, returns the witness of a finding (called once per site);
+/// objectKey, when set, adds a run-independent name to every object, and
+/// objectLocation the source location of its allocation.
 inline void writeResultsJSON(
     std::ostream &os, const std::string &tool, const std::string &check,
     const std::map<std::string, std::string> &configuration,
     const DefectScan &scan,
     const std::function<std::string(std::size_t)> &siteOf,
-    const std::function<std::vector<WitnessStep>(std::size_t)> &witnessOf = {}) {
+    const std::function<std::vector<WitnessStep>(std::size_t)> &witnessOf = {},
+    const std::function<std::string(ObjectID)> &objectKey = {},
+    const std::function<std::string(ObjectID)> &objectLocation = {}) {
   std::map<std::string, std::pair<std::size_t, std::set<ObjectID>>> sites;
   for (std::size_t index = 0; index < scan.findings.size(); ++index) {
     auto &site = sites.emplace(siteOf(index), std::make_pair(index, std::set<ObjectID>{}))
@@ -72,8 +76,16 @@ inline void writeResultsJSON(
      << (scan.exhaustive ? "true" : "false") << ",\"objects\":[";
   bool first = true;
   for (const auto &object : scan.objectStatus) {
-    os << (first ? "" : ",") << "{\"object\":" << object.first << ",\"status\":\""
-       << statusText(object.second) << "\"}";
+    os << (first ? "" : ",") << "{\"object\":" << object.first;
+    if (objectKey) {
+      os << ",\"key\":";
+      writeJSONString(os, objectKey(object.first));
+    }
+    if (objectLocation) {
+      os << ",\"location\":";
+      writeJSONString(os, objectLocation(object.first));
+    }
+    os << ",\"status\":\"" << statusText(object.second) << "\"}";
     first = false;
   }
   os << "],\"findings\":[";
@@ -88,6 +100,16 @@ inline void writeResultsJSON(
       firstObject = false;
     }
     os << ']';
+    if (objectKey) {
+      os << ",\"object_keys\":[";
+      firstObject = true;
+      for (auto object : site.second.second) {
+        os << (firstObject ? "" : ",");
+        writeJSONString(os, objectKey(object));
+        firstObject = false;
+      }
+      os << ']';
+    }
     if (witnessOf) {
       os << ",\"witness\":[";
       bool firstStep = true;

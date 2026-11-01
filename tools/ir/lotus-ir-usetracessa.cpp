@@ -393,6 +393,7 @@ int main(int argc, char **argv) {
           }
           return steps;
         };
+      StableObjectKeys objectKeys(*svfg, *module);
       cli::writeResultsJSON(
           out, "usetracessa", Check,
           {{"object_mode", ObjectMode},
@@ -402,7 +403,8 @@ int main(int argc, char **argv) {
           [&](std::size_t index) {
             return findingSite(result.graph.node(checkReport->findings[index].sink));
           },
-          witnessOf);
+          witnessOf, objectKeys,
+          [&](ObjectID object) { return objectKeys.location(object); });
     }
     if (Timing) {
       std::cerr << std::fixed << std::setprecision(3)

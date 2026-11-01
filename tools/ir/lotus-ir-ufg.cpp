@@ -331,6 +331,7 @@ int main(int argc, char **argv) {
           }
           return steps;
         };
+      StableObjectKeys objectKeys(*svfg, *module);
       cli::writeResultsJSON(
           out, "ufg", Check, {{"object_granularity", ObjectGranularity}},
           *checkReport,
@@ -339,7 +340,8 @@ int main(int argc, char **argv) {
             return nodes.empty() ? std::string("unknown")
                                  : findingSite(expanded.graph().node(nodes.back()));
           },
-          witnessOf);
+          witnessOf, objectKeys,
+          [&](ObjectID object) { return objectKeys.location(object); });
     }
     if (Timing) {
       auto millis = [](Clock::time_point from, Clock::time_point to) {
