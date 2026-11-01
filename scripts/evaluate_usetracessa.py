@@ -16,8 +16,13 @@ kept for timeouts. `--repeat N` runs every configuration N times (summarize
 medians with summarize_usetracessa.py). `--preset` loads limits from
 scripts/eval_presets.json, `--manifest` reads benchmarks from a manifest, and
 `--details-dir` stores per-run (sink site, object, status) JSON for the
-differential oracle (oracle_usetracessa.py). The results file holds run
+differential oracle (compare_usetracessa.py). The results file holds run
 metadata and the records.
+
+Binaries are looked up in --bin-dir (or $LOTUS_BIN_DIR; default build/bin
+under the Lotus root); --<tool>-bin overrides one tool. Relative bitcode paths
+in a manifest resolve against --benchmarks-root (or $LOTUS_BENCHMARKS_ROOT;
+default the Lotus root).
 
 Examples:
     python3 scripts/evaluate_usetracessa.py
@@ -44,10 +49,11 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 PRESETS = Path(__file__).resolve().parent / "eval_presets.json"
+DEFAULT_BIN_DIR = ROOT / "build/bin"
 DEFAULT_BINS = {
-    "usetracessa": ROOT / "build/bin/lotus-ir-usetracessa",
-    "ufg": ROOT / "build/bin/lotus-ir-ufg",
-    "saber": ROOT / "build/bin/lotus-check",
+    "usetracessa": "lotus-ir-usetracessa",
+    "ufg": "lotus-ir-ufg",
+    "saber": "lotus-check",
 }
 SHARED_CHECKS = ("double-free", "use-after-free", "memory-leak", "file-leak")
 SABER_CHECKS = ("double-free", "use-after-free", "memory-leak", "file-leak")
@@ -569,8 +575,17 @@ def main():
     parser.add_argument("--witnesses", action="store_true",
                         help="Include one witness per finding site in --details-dir "
                              "files (UseTraceSSA/UFG)")
+    parser.add_argument("--benchmarks-root", type=Path,
+                        default=Path(os.environ.get("LOTUS_BENCHMARKS_ROOT", ROOT)),
+                        help="Base of relative manifest bitcode paths "
+                             "(default: $LOTUS_BENCHMARKS_ROOT or the Lotus root)")
+    parser.add_argument("--bin-dir", type=Path,
+                        default=Path(os.environ.get("LOTUS_BIN_DIR", DEFAULT_BIN_DIR)),
+                        help="Directory holding the tool binaries "
+                             "(default: $LOTUS_BIN_DIR or build/bin under the Lotus root)")
     for tool in DEFAULT_BINS:
-        parser.add_argument(f"--{tool}-bin", type=Path, default=DEFAULT_BINS[tool])
+        parser.add_argument(f"--{tool}-bin", type=Path,
+                            help=f"{DEFAULT_BINS[tool]} binary (default: in --bin-dir)")
     known, _ = parser.parse_known_args()
     if known.preset:
         parser.set_defaults(**presets[known.preset])
@@ -600,7 +615,9 @@ def main():
             if value > 2**32 - 1:
                 parser.error(f"--saber-{flag} exceeds Saber's unsigned option range")
             saber_budgets[flag] = value
-    binaries = {tool: getattr(args, f"{tool}_bin").resolve() for tool in tools}
+    binaries = {tool: (getattr(args, f"{tool}_bin") or
+                       args.bin_dir / DEFAULT_BINS[tool]).expanduser().resolve()
+                for tool in tools}
     for tool, binary in binaries.items():
         if not binary.is_file():
             parser.error(f"{tool} binary not found: {binary}")
@@ -611,13 +628,15 @@ def main():
         benchmarks = []
         for entry in manifest["benchmarks"]:
             path = Path(entry["bitcode"])
-            path = (path if path.is_absolute() else ROOT / path).resolve()
+            path = (path if path.is_absolute()
+                    else args.benchmarks_root.expanduser() / path).resolve()
             benchmarks.append(path)
             benchmark_info[path] = {
                 "benchmark": entry["name"],
                 "suite": entry.get("suite", manifest.get("suite")),
                 "version": entry.get("version"),
                 "kloc": entry.get("kloc"),
+                "debug_lines": entry.get("debug_lines"),
             }
     elif args.inputs:
         benchmarks = [path.resolve() for path in args.inputs]
