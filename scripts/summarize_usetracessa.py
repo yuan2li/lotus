@@ -73,6 +73,7 @@ def aggregate(records):
         row = dict(zip(CONFIG_KEYS, key))
         row["runs"] = len(runs)
         row["kloc"] = runs[0].get("kloc")
+        row["debug_lines"] = runs[0].get("debug_lines")
         failed = [run["status"] for run in runs if run["status"] != "SUCCESS"]
         row["status"] = label(failed[0]) if failed else "OK"
         row["check_result"] = runs[0].get("check_result")
@@ -150,7 +151,7 @@ def main():
     rows = aggregate(load(args.results))
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    header = list(CONFIG_KEYS) + ["kloc", "runs", "status", "check_result",
+    header = list(CONFIG_KEYS) + ["kloc", "debug_lines", "runs", "status", "check_result",
                                   "unknown_incomplete_model"] + list(METRICS) + list(HISTOGRAMS)
     write_csv(args.out_dir / "runs.csv", header,
               [[row.get(name) for name in header] for row in
