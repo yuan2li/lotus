@@ -107,6 +107,13 @@ void TemporalHistory::connectCall(TraceFlowGraph &g,
   connectTargets(g, caller, site, callSite, references, completeTargets,
                  std::move(objects));
 }
+void TemporalHistory::connectCallTargets(
+    TraceFlowGraph &g, const TemporalHistory &caller, SiteID site,
+    CallSiteID callSite, const std::vector<const TemporalHistory *> &targets,
+    bool completeTargets, ObjectSet objects) {
+  connectTargets(g, caller, site, callSite, targets, completeTargets,
+                 std::move(objects));
+}
 void TemporalHistory::connectDirectCall(TraceFlowGraph &g,
                                         const TemporalHistory &caller,
                                         SiteID site, CallSiteID callSite,

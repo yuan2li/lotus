@@ -298,6 +298,57 @@ TEST(UseTraceSSANative, DenseControlFlowMatchesSparseSkeleton) {
   }
 }
 
+TEST(UseTraceSSANative, ResolvedIndirectCallsJoinTheHistory) {
+  llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
+  auto module = llvm::parseAssemblyString(R"IR(
+    declare i8* @malloc(i64)
+    declare void @free(i8*)
+    define void @release(i8* %p) {
+      call void @free(i8* %p)
+      ret void
+    }
+    define void @keep(i8* %p) {
+      ret void
+    }
+    define void @flow(void (i8*)* %callback) {
+      %heap = call i8* @malloc(i64 8)
+      call void %callback(i8* %heap)
+      %used = load i8, i8* %heap
+      ret void
+    }
+  )IR", diagnostic, context);
+  ASSERT_TRUE(module);
+  auto &function = *module->getFunction("flow");
+  const llvm::CallBase *indirect = nullptr;
+  lotus::analysis::SVFG svfg;
+  svfg.addObjectForValue(module->getFunction("release")->getArg(0), 10);
+  for (const auto &block : function) for (const auto &instruction : block) {
+    if (instruction.getName() == "heap") svfg.addObjectForValue(&instruction, 10);
+    if (const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction))
+      if (!call->getCalledFunction()) indirect = call;
+  }
+  ASSERT_TRUE(indirect);
+  // Unresolved: the free behind the function pointer is invisible and the
+  // model is incomplete.
+  auto unresolved = buildUseTraceSSAFromLotusSVFG(svfg, *module,
+                                                  NativeHistoryMode::UseAfterFree);
+  auto before = DefectDetector(unresolved.graph, 3).scan(DefectKind::UseAfterFree);
+  EXPECT_TRUE(before.findings.empty());
+  // Resolved to both targets: the path through @release reaches the load.
+  svfg.addCalleeToIndCallSite(module->getFunction("release"), indirect);
+  svfg.addCalleeToIndCallSite(module->getFunction("keep"), indirect);
+  auto resolved = buildUseTraceSSAFromLotusSVFG(svfg, *module,
+                                                NativeHistoryMode::UseAfterFree);
+  ASSERT_TRUE(resolved.graph.verify());
+  // External malloc/free stay incomplete; only the indirect call is resolved.
+  EXPECT_EQ(resolved.graph.issues().size() + 1, unresolved.graph.issues().size());
+  auto after = DefectDetector(resolved.graph, 3).scan(DefectKind::UseAfterFree);
+  EXPECT_EQ(after.status, QueryStatus::Found);
+  ASSERT_EQ(after.findings.size(), 1u);
+  EXPECT_EQ(after.findings[0].objects, std::vector<ObjectID>({10}));
+  expectFixedMatchesBatch(resolved.graph, DefectKind::UseAfterFree);
+}
+
 TEST(UseTraceSSANative, AllocationSiteGranularityMergesAbstractCopies) {
   llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
   auto module = llvm::parseAssemblyString(R"IR(
