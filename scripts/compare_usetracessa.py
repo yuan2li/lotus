@@ -5,7 +5,8 @@ oracle  Differential oracle (RQ4). For each program, client and object
         granularity, compare UseTraceSSA batch on the sparse graph (the
         reference) with every other UseTraceSSA configuration and with UFG:
         the status of every object and the set of (sink site, object) findings.
-        Runs with different points-to sets (--ptas) are compared separately.
+        Runs with different points-to sets (--ptas) or object scopes
+        (--object-scopes) are compared separately.
         Reports the number of compared queries and lists every mismatch;
         exits with 1 when there is one.
 
@@ -88,7 +89,7 @@ def oracle(records):
         if record["tool"] == "saber" or record.get("repeat", 0) != 0:
             continue
         key = (benchmark(record), record["bug_type"], record["object_granularity"],
-               record.get("pta") or "andersen")
+               record.get("pta") or "andersen", record.get("object_scope") or "heap")
         groups.setdefault(key, []).append(record)
     compared = mismatches = 0
     for key in sorted(groups):
@@ -200,6 +201,8 @@ def match(records, out, sample, seed, granularity="site", pta="andersen"):
         if record["tool"] != "saber" and record.get("object_granularity") != granularity:
             continue
         if record["tool"] != "saber" and (record.get("pta") or "andersen") != pta:
+            continue
+        if record["tool"] != "saber" and (record.get("object_scope") or "heap") != "heap":
             continue
         details = json.loads(Path(record["details"]).read_text())
         sites = (saber_locations(record, details) if record["tool"] == "saber"
