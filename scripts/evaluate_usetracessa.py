@@ -17,6 +17,8 @@ Examples:
         --inputs /path/to/example.bc --results /tmp/example-eval.json
     python3 scripts/evaluate_usetracessa.py --tools usetracessa \
         --object-modes batch,fixed --object-granularities site,abstract
+    python3 scripts/evaluate_usetracessa.py --tools usetracessa \
+        --temporal-graphs sparse,icfg   # icfg is the IDE-ICFG configuration
 """
 import argparse
 import concurrent.futures
@@ -42,6 +44,7 @@ SABER_CHECKS = ("double-free", "use-after-free", "memory-leak", "file-leak")
 SABER_SMT_CHECKS = ("double-free", "memory-leak", "file-leak")
 OBJECT_MODES = ("batch", "fixed")
 OBJECT_GRANULARITIES = ("site", "abstract")
+TEMPORAL_GRAPHS = ("sparse", "icfg")
 SVFG_MSSA_MODES = ("auto", "on", "off")
 BITCODE_MAGIC = (b"BC\xc0\xde", b"\xde\xc0\x17\x0b")
 KEY_VALUE = re.compile(r"([a-z][a-z0-9_]*)=([^\s]+)")
@@ -262,6 +265,7 @@ def build_cmd(task, binaries, context_limit, budgets=None,
                f"--svfg-mssa={task['svfg_mssa']}"]
         if tool == "usetracessa":
             cmd.append(f"--object-mode={task['object_mode']}")
+            cmd.append(f"--temporal-graph={task['temporal_graph']}")
         for flag in IR_BUDGETS:
             limit = (budgets or {}).get(flag, 0)
             cmd.append(f"--{flag}={limit if limit else 'unlimited'}")
@@ -277,7 +281,8 @@ def build_cmd(task, binaries, context_limit, budgets=None,
 
 
 def make_tasks(benchmarks, tools, checks, object_modes=("batch",),
-               granularities=("site",), svfg_mssa="auto", saber_smt=False):
+               granularities=("site",), svfg_mssa="auto", saber_smt=False,
+               temporal_graphs=("sparse",)):
     """Expand tools into configurations; options that do not apply stay None."""
     tasks = []
     for bc_path in benchmarks:
@@ -286,13 +291,15 @@ def make_tasks(benchmarks, tools, checks, object_modes=("batch",),
                 if tool not in tools:
                     continue
                 for granularity in granularities:
-                    for object_mode in (object_modes if tool == "usetracessa"
-                                        else (None,)):
-                        tasks.append({
-                            "tool": tool, "bug_type": bug_type, "bc_path": bc_path,
-                            "smt_mode": "nosmt", "object_mode": object_mode,
-                            "object_granularity": granularity,
-                            "svfg_mssa": svfg_mssa})
+                    utssa = tool == "usetracessa"
+                    for object_mode in (object_modes if utssa else (None,)):
+                        for temporal_graph in (temporal_graphs if utssa else (None,)):
+                            tasks.append({
+                                "tool": tool, "bug_type": bug_type, "bc_path": bc_path,
+                                "smt_mode": "nosmt", "object_mode": object_mode,
+                                "temporal_graph": temporal_graph,
+                                "object_granularity": granularity,
+                                "svfg_mssa": svfg_mssa})
             if bug_type in SABER_CHECKS and "saber" in tools:
                 smt_modes = ("nosmt", "smt") if (
                     saber_smt and bug_type in SABER_SMT_CHECKS) else ("nosmt",)
@@ -300,7 +307,8 @@ def make_tasks(benchmarks, tools, checks, object_modes=("batch",),
                     tasks.append({
                         "tool": "saber", "bug_type": bug_type, "bc_path": bc_path,
                         "smt_mode": smt_mode, "object_mode": None,
-                        "object_granularity": None, "svfg_mssa": None})
+                        "temporal_graph": None, "object_granularity": None,
+                        "svfg_mssa": None})
     return tasks
 
 
@@ -327,6 +335,7 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
         "task_id": index, "tool": tool, "bug_type": bug_type,
         "smt_mode": task["smt_mode"],
         "object_mode": task["object_mode"],
+        "temporal_graph": task["temporal_graph"],
         "object_granularity": task["object_granularity"],
         "svfg_mssa": task["svfg_mssa"],
         "bc": bc_path.name, "bc_path": str(bc_path),
@@ -407,6 +416,10 @@ def main():
     parser.add_argument("--object-modes", type=choice_list(OBJECT_MODES),
                         default=("batch",),
                         help="UseTraceSSA search: batch, fixed, or both (default: batch)")
+    parser.add_argument("--temporal-graphs", type=choice_list(TEMPORAL_GRAPHS),
+                        default=("sparse",),
+                        help="UseTraceSSA temporal graph: sparse, icfg (IDE-ICFG: same "
+                             "solver on every instruction), or both (default: sparse)")
     parser.add_argument("--object-granularities", type=choice_list(OBJECT_GRANULARITIES),
                         default=("site",),
                         help="UseTraceSSA/UFG resource objects: site, abstract, or both "
@@ -466,11 +479,13 @@ def main():
         parser.error("no valid benchmark bitcode files were selected")
 
     tasks = make_tasks(benchmarks, tools, args.checks, args.object_modes,
-                       args.object_granularities, args.svfg_mssa, args.saber_smt)
+                       args.object_granularities, args.svfg_mssa, args.saber_smt,
+                       args.temporal_graphs)
     records = [None] * len(tasks)
     print(f"Benchmarks: {len(benchmarks)}  Tools: {','.join(tools)}")
     print(f"Tasks: {len(tasks)}  Workers: {args.max_workers}")
     print(f"Checks: {','.join(args.checks)}  Object modes: {','.join(args.object_modes)}  "
+          f"Temporal graphs: {','.join(args.temporal_graphs)}  "
           f"Granularities: {','.join(args.object_granularities)}  "
           f"SVFG MSSA: {args.svfg_mssa}  Saber SMT: {'yes' if args.saber_smt else 'no'}")
     print(f"Timeout: {args.timeout:g}s  RSS limit: {args.mem_limit_gb:g} GiB")
@@ -500,6 +515,7 @@ def main():
                 f"[{record['status']:12s}] {record['tool']:12s} "
                 f"{record['bug_type']:16s} {record['bc']:16s} "
                 f"mode={record['smt_mode']}/{record['object_mode'] or '-'}/"
+                f"{record['temporal_graph'] or '-'}/"
                 f"{record['object_granularity'] or '-':8s} "
                 f"time={record['wall_time_s']:8.3f}s "
                 f"rss={record['max_rss_mb']:8.1f}MiB "
