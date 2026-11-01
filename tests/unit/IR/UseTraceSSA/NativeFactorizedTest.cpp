@@ -184,6 +184,52 @@ TEST(UseTraceSSANative, PropertySelectsEventsSitesAndObjectUniverse) {
   }
 }
 
+TEST(UseTraceSSANative, AllocationSiteGranularityMergesAbstractCopies) {
+  llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
+  auto module = llvm::parseAssemblyString(R"IR(
+    declare i8* @malloc(i64)
+    declare void @free(i8*)
+    define void @site() {
+      %heap = call i8* @malloc(i64 16)
+      %field = getelementptr i8, i8* %heap, i64 8
+      call void @free(i8* %heap)
+      call void @free(i8* %field)
+      ret void
+    }
+  )IR", diagnostic, context);
+  ASSERT_TRUE(module);
+  const llvm::Value *heap = nullptr, *field = nullptr;
+  for (const auto &instruction : module->getFunction("site")->getEntryBlock()) {
+    if (instruction.getName() == "heap") heap = &instruction;
+    if (instruction.getName() == "field") field = &instruction;
+  }
+  // 10 is the canonical object, 11 an unbound per-offset copy of the same
+  // allocation, and 12 a field bound to the copy.
+  lotus::analysis::SVFG svfg;
+  svfg.setObjectValue(10, heap);
+  svfg.setObjectValue(11, heap);
+  lotus::analysis::SVFG::ObjectInfo fieldInfo;
+  fieldInfo.baseObjId = 11;
+  fieldInfo.fieldOffset = 8;
+  fieldInfo.hasFieldOffset = true;
+  svfg.setObjectInfo(12, fieldInfo);
+  svfg.setObjectValue(12, field);
+  svfg.setObjectsForValue(field, {12});
+
+  auto merged = buildUseTraceSSAFromLotusSVFG(svfg, *module, NativeHistoryMode::DoubleFree);
+  EXPECT_EQ(merged.graph.resourceCandidates(), std::vector<ObjectID>({10}));
+  auto scan = DefectDetector(merged.graph, 3).scan(DefectKind::DoubleFree);
+  ASSERT_EQ(scan.findings.size(), 1u);
+  EXPECT_EQ(scan.findings.front().objects, std::vector<ObjectID>({10}));
+
+  NativeHistoryOptions abstractObjects;
+  abstractObjects.allocationSiteObjects = false;
+  auto split = buildUseTraceSSAFromLotusSVFG(svfg, *module, NativeHistoryMode::DoubleFree,
+                                             abstractObjects);
+  EXPECT_EQ(split.graph.resourceCandidates(), std::vector<ObjectID>({10, 11, 12}));
+  EXPECT_TRUE(DefectDetector(split.graph, 3).scan(DefectKind::DoubleFree).findings.empty());
+}
+
 TEST(UseTraceSSANative, UnknownSourceKeepsNamedObjectCandidates) {
   llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
   auto module = llvm::parseAssemblyString(R"IR(

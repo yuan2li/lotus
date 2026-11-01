@@ -18,6 +18,11 @@ struct NativeHistoryOptions {
   bool instructionText = true;
   /// Optional phase observer, in milliseconds; it never times upstream SVFG.
   std::function<void(const char *, double)> phaseTiming = {};
+  /// Merge SVFG abstract objects that share an allocation site (fields,
+  /// field-insensitive copies and unbound per-offset PTA objects) into one
+  /// object. Resource properties track whole allocations, so this is the
+  /// default; false keeps the SVFG's abstract-object granularity.
+  bool allocationSiteObjects = true;
 };
 
 /// Construct ordered histories from this revision's SVFG and the LLVM CFG.

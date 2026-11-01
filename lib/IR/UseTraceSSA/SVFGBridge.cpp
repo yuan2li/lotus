@@ -411,19 +411,45 @@ bool dominatesUse(const Layout &layout, const llvm::DominatorTree &dominators,
   return source && target && dominators.dominates(source, target);
 }
 
-ObjectSet resourceObjects(const analysis::SVFG &svfg, const llvm::Value *pointer) {
+/// The SVFG may number one allocation several times: field objects, their
+/// field-insensitive copies, and per-offset PTA objects never bound to a base.
+/// Follow the base chain and name the object first registered for the root's
+/// allocation value, so every copy maps to one deterministic ID.
+ObjectID allocationSiteObject(const analysis::SVFG &svfg, ObjectID object) {
+  auto root = static_cast<std::uint32_t>(object);
+  for (unsigned depth = 0; depth < 64; ++depth) {
+    const auto *info = svfg.getObjectInfo(root);
+    if (!info || info->baseObjId == 0 || info->baseObjId == root) break;
+    root = info->baseObjId;
+  }
+  if (const llvm::Value *site = svfg.getObjectValue(root))
+    if (std::uint32_t canonical = svfg.getObjectId(site)) return canonical;
+  return root;
+}
+
+ObjectSet canonicalObjects(const analysis::SVFG &svfg, const ObjectSet &objects,
+                           bool allocationSites) {
+  if (!allocationSites || objects.isUnknown()) return objects;
+  std::vector<ObjectID> merged;
+  for (auto object : objects.objects())
+    merged.push_back(allocationSiteObject(svfg, object));
+  return ObjectSet::known(std::move(merged));
+}
+
+ObjectSet resourceObjects(const analysis::SVFG &svfg, const llvm::Value *pointer,
+                          bool allocationSites) {
   const auto &pointsTo = svfg.getObjectIds(pointer);
   if (pointsTo.empty()) return ObjectSet::unknown();
   std::vector<ObjectID> objects;
   for (auto object : pointsTo) {
     if (svfg.isUnknownObject(object)) return ObjectSet::unknown();
-    objects.push_back(object);
+    objects.push_back(allocationSites ? allocationSiteObject(svfg, object) : object);
   }
   return ObjectSet::known(std::move(objects));
 }
 
 ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &module,
-                           NativeHistoryMode mode) {
+                           NativeHistoryMode mode, bool allocationSites) {
   ResourcePlan plan{resourceProperty(mode)};
   plan.hasRequired = mode == NativeHistoryMode::Full;
   std::set<const llvm::Function *> called;
@@ -480,7 +506,7 @@ ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &modul
     auto cached = cache.find(pointer);
     if (cached == cache.end()) {
       auto raw = objectGuards.find(pointer);
-      auto objects = raw == objectGuards.end() ? resourceObjects(svfg, pointer)
+      auto objects = raw == objectGuards.end() ? resourceObjects(svfg, pointer, allocationSites)
                                                : raw->second;
       if (objects.isUnknown()) {
         const auto *site =
@@ -642,7 +668,8 @@ SVFGHistoryResult buildUseTraceSSAFromLotusSVFG(const analysis::SVFG &svfg,
   SVFGConstructionInput input;
   std::map<const llvm::Function *, Layout> layouts;
   PhaseTimer timer(options);
-  const auto plan = planResources(svfg, module, mode);
+  const auto plan =
+      planResources(svfg, module, mode, options.allocationSiteObjects);
   timer.finish("usetracessa_plan");
   if (!plan.hasRequired) {
     SVFGHistoryResult result;
@@ -757,6 +784,8 @@ SVFGHistoryResult buildUseTraceSSAFromLotusSVFG(const analysis::SVFG &svfg,
         auto located = locateLotusSVFGEdge(*edge, nextEdge++, site, boundary);
         for (auto object : edge->getPointsTo())
           if (svfg.isUnknownObject(object)) located.objects = ObjectSet::unknown();
+        located.objects = canonicalObjects(svfg, located.objects,
+                                           options.allocationSiteObjects);
         if (sourceFunction && targetFunction && sourceFunction != targetFunction &&
             located.kind != FlowKind::Call && located.kind != FlowKind::Return)
           input.issues.push_back("cross-function SVFG edge " +
