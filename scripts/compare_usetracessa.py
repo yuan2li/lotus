@@ -150,7 +150,7 @@ def saber_locations(record, report):
     return result
 
 
-def match(records, out, sample, seed):
+def match(records, out, sample, seed, granularity="site"):
     table = {}
     for record in records:
         if record.get("repeat", 0) != 0:
@@ -158,7 +158,7 @@ def match(records, out, sample, seed):
         if record["tool"] == "usetracessa" and not all(
                 record.get(name) == value for name, value in REFERENCE.items()):
             continue
-        if record["tool"] != "saber" and record.get("object_granularity") != "site":
+        if record["tool"] != "saber" and record.get("object_granularity") != granularity:
             continue
         details = json.loads(Path(record["details"]).read_text())
         sites = (saber_locations(record, details) if record["tool"] == "saber"
@@ -209,11 +209,14 @@ def main():
     match_parser.add_argument("--sample", type=int, default=0,
                               help="Locations sampled per program and client")
     match_parser.add_argument("--seed", type=int, default=2027)
+    match_parser.add_argument("--granularity", choices=("site", "abstract"),
+                              default="site",
+                              help="UseTraceSSA/UFG object granularity to match")
     args = parser.parse_args()
     records = load_records(args.results)
     if args.command == "oracle":
         return oracle(records)
-    return match(records, args.out, args.sample, args.seed)
+    return match(records, args.out, args.sample, args.seed, args.granularity)
 
 
 if __name__ == "__main__":
