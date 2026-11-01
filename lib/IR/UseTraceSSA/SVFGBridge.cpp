@@ -170,6 +170,18 @@ ResourceProperty resourceProperty(NativeHistoryMode mode) {
   throw std::invalid_argument("UseTraceSSA: invalid native history mode");
 }
 
+/// Heap allocators and deallocators: C malloc/calloc/free and the C++
+/// operator new/delete families (sized, array, nothrow and aligned forms),
+/// which the SVFG's pointer analysis also treats as heap allocation sites.
+bool heapAllocator(llvm::StringRef name) {
+  return name == "malloc" || name == "calloc" ||
+         ((name.startswith("_Znw") || name.startswith("_Zna")) && !name.endswith("Pv"));
+}
+
+bool heapDeallocator(llvm::StringRef name) {
+  return name == "free" || name.startswith("_ZdlPv") || name.startswith("_ZdaPv");
+}
+
 Event resourceEvent(const llvm::Instruction &instruction, const ResourceProperty &property) {
   if (hasEvent(property.events, Event::Escape))
     if (const auto *ret = llvm::dyn_cast<llvm::ReturnInst>(&instruction))
@@ -184,8 +196,8 @@ Event resourceEvent(const llvm::Instruction &instruction, const ResourceProperty
   if (!callee) return Event::None;
   auto name = callee->getName();
   Event event = Event::None;
-  if (name == "free" && call->arg_size()) event = Event::Release;
-  if ((name == "malloc" || name == "calloc") && call->getType()->isPointerTy())
+  if (heapDeallocator(name) && call->arg_size()) event = Event::Release;
+  if (heapAllocator(name) && call->getType()->isPointerTy())
     event = Event::Allocate;
   if (name == "fopen" && call->getType()->isPointerTy()) event = Event::Open;
   if (name == "fclose" && call->arg_size()) event = Event::Close;
@@ -201,8 +213,8 @@ bool structuralCall(const llvm::Instruction &instruction) {
   if (!callee || !callee->isDeclaration()) return true;
   if (callee->isIntrinsic()) return false;
   auto name = callee->getName();
-  return name != "free" && name != "malloc" && name != "calloc" &&
-         name != "fopen" && name != "fclose";
+  return !heapAllocator(name) && !heapDeallocator(name) && name != "fopen" &&
+         name != "fclose";
 }
 
 struct ResourcePlan {
@@ -490,10 +502,10 @@ ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &modul
           hasEvent(event, plan.property.sources))
         synthetic.emplace(&instruction, nextSynthetic++);
     }
-  auto directAcquisition = [](const llvm::Value *pointer, llvm::StringRef name) {
+  auto directAcquisition = [](const llvm::Value *pointer, auto matches) {
     const auto *call = llvm::dyn_cast<llvm::CallBase>(pointer->stripPointerCasts());
     const auto *callee = call ? call->getCalledFunction() : nullptr;
-    return callee && callee->getName() == name;
+    return callee && matches(callee->getName());
   };
   std::unordered_map<const llvm::Value *, ObjectSet> objectGuards;
   std::unordered_map<const llvm::Value *, ObjectSet> projectedGuards;
@@ -511,9 +523,9 @@ ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &modul
       pointer = hasEvent(event, Event::Allocate | Event::Open) ? &instruction :
                                                                call.getArgOperand(0);
       if ((mode == NativeHistoryMode::MemoryLeak && event == Event::Release &&
-           (directAcquisition(pointer, "malloc") || directAcquisition(pointer, "calloc"))) ||
+           directAcquisition(pointer, heapAllocator)) ||
           (mode == NativeHistoryMode::FileLeak && event == Event::Close &&
-           directAcquisition(pointer, "fopen")))
+           directAcquisition(pointer, [](llvm::StringRef name) { return name == "fopen"; })))
         certainty = Certainty::Must;
     }
     bool project =
