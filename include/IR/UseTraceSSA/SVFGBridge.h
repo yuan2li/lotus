@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -29,6 +30,11 @@ struct NativeHistoryOptions {
   /// a temporal site and every basic block, instead of only event/call sites
   /// over contracted blocks. Guards, effects and the solver are unchanged.
   bool denseControlFlow = false;
+  /// Points-to source for event pointers in place of the SVFG's own
+  /// (Andersen) sets, e.g. a flow-sensitive analysis over the same SVFG and
+  /// object IDs. nullopt falls back to the SVFG for that pointer. Call edges
+  /// still come from the SVFG.
+  std::function<std::optional<analysis::SVFGNodeBS>(const llvm::Value *)> pointsTo = {};
 };
 
 /// Construct ordered histories from this revision's SVFG and the LLVM CFG.

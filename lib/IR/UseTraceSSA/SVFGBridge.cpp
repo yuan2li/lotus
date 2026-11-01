@@ -457,8 +457,10 @@ ObjectSet canonicalObjects(const analysis::SVFG &svfg, const ObjectSet &objects,
 }
 
 ObjectSet resourceObjects(const analysis::SVFG &svfg, const llvm::Value *pointer,
-                          bool allocationSites) {
-  const auto &pointsTo = svfg.getObjectIds(pointer);
+                          bool allocationSites, const NativeHistoryOptions &options) {
+  std::optional<analysis::SVFGNodeBS> provided;
+  if (options.pointsTo) provided = options.pointsTo(pointer);
+  const auto &pointsTo = provided ? *provided : svfg.getObjectIds(pointer);
   if (pointsTo.empty()) return ObjectSet::unknown();
   std::vector<ObjectID> objects;
   for (auto object : pointsTo) {
@@ -469,7 +471,8 @@ ObjectSet resourceObjects(const analysis::SVFG &svfg, const llvm::Value *pointer
 }
 
 ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &module,
-                           NativeHistoryMode mode, bool allocationSites) {
+                           NativeHistoryMode mode, const NativeHistoryOptions &options) {
+  const bool allocationSites = options.allocationSiteObjects;
   ResourcePlan plan{resourceProperty(mode)};
   plan.hasRequired = mode == NativeHistoryMode::Full;
   std::set<const llvm::Function *> called;
@@ -534,8 +537,9 @@ ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &modul
     auto cached = cache.find(pointer);
     if (cached == cache.end()) {
       auto raw = objectGuards.find(pointer);
-      auto objects = raw == objectGuards.end() ? resourceObjects(svfg, pointer, allocationSites)
-                                               : raw->second;
+      auto objects = raw == objectGuards.end()
+                         ? resourceObjects(svfg, pointer, allocationSites, options)
+                         : raw->second;
       if (objects.isUnknown()) {
         const auto *site =
             llvm::dyn_cast<llvm::Instruction>(pointer->stripPointerCasts());
@@ -706,7 +710,7 @@ SVFGHistoryResult buildUseTraceSSAFromLotusSVFG(const analysis::SVFG &svfg,
   SVFGConstructionInput input;
   std::map<const llvm::Function *, Layout> layouts;
   PhaseTimer timer(options);
-  auto plan = planResources(svfg, module, mode, options.allocationSiteObjects);
+  auto plan = planResources(svfg, module, mode, options);
   plan.dense = options.denseControlFlow;
   timer.finish("usetracessa_plan");
   if (!plan.hasRequired) {

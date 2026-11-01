@@ -351,6 +351,47 @@ TEST(UseTraceSSANative, ResolvedIndirectCallsJoinTheHistory) {
   expectFixedMatchesBatch(resolved.graph, DefectKind::UseAfterFree);
 }
 
+TEST(UseTraceSSANative, PointsToSourceReplacesSVFGSets) {
+  llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
+  auto module = llvm::parseAssemblyString(R"IR(
+    declare i8* @malloc(i64)
+    declare void @free(i8*)
+    define void @flow() {
+      %a = call i8* @malloc(i64 8)
+      %b = call i8* @malloc(i64 8)
+      %p = select i1 true, i8* %a, i8* %b
+      call void @free(i8* %p)
+      call void @free(i8* %b)
+      ret void
+    }
+  )IR", diagnostic, context);
+  ASSERT_TRUE(module);
+  const llvm::Value *p = nullptr;
+  lotus::analysis::SVFG svfg;
+  for (const auto &instruction : llvm::instructions(*module->getFunction("flow"))) {
+    if (instruction.getName() == "a") svfg.addObjectForValue(&instruction, 10);
+    if (instruction.getName() == "b") svfg.addObjectForValue(&instruction, 20);
+    if (instruction.getName() == "p") {
+      p = &instruction;
+      svfg.addObjectForValue(&instruction, 10);
+      svfg.addObjectForValue(&instruction, 20);
+    }
+  }
+  // The SVFG's sets let %p alias %b: a may double free of object 20.
+  auto merged = buildUseTraceSSAFromLotusSVFG(svfg, *module, NativeHistoryMode::DoubleFree);
+  EXPECT_EQ(DefectDetector(merged.graph, 3).scan(DefectKind::DoubleFree).findings.size(), 1u);
+  // A more precise source separates them; other pointers fall back to the SVFG.
+  NativeHistoryOptions precise;
+  precise.pointsTo = [p](const llvm::Value *value) -> std::optional<lotus::analysis::SVFGNodeBS> {
+    if (value == p) return lotus::analysis::SVFGNodeBS{10};
+    return std::nullopt;
+  };
+  auto split = buildUseTraceSSAFromLotusSVFG(svfg, *module, NativeHistoryMode::DoubleFree, precise);
+  EXPECT_EQ(split.graph.resourceCandidates(), std::vector<ObjectID>({10, 20}));
+  EXPECT_TRUE(DefectDetector(split.graph, 3).scan(DefectKind::DoubleFree).findings.empty());
+  expectFixedMatchesBatch(split.graph, DefectKind::DoubleFree);
+}
+
 TEST(UseTraceSSANative, CxxNewAndDeleteAreHeapEvents) {
   llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
   auto module = llvm::parseAssemblyString(R"IR(
