@@ -32,6 +32,10 @@ struct DefectScanOptions {
   bool firstFinding = false;
   /// Disable only for count-only scans; other modes retain object identities.
   bool retainObjects = true;
+  /// Run one same-object query per candidate instead of one mask-lifted
+  /// batch. Findings and per-object statuses match the batch scan; statistics
+  /// sum over the per-object queries (no mask operations).
+  bool fixedObjects = false;
 };
 
 struct DefectScan {
@@ -78,6 +82,8 @@ public:
 private:
   DefectScan scanImpl(DefectKind kind, bool firstOnly,
                       DefectScanOptions options = {}) const;
+  void scanFixedObjects(DefectKind kind, Query q, bool firstOnly,
+                        const DefectScanOptions &options, DefectScan &scan) const;
   const TraceFlowGraph &Graph;
   std::optional<std::size_t> ContextLimit;
   SearchLimits Limits;
