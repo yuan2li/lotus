@@ -40,6 +40,13 @@ struct TemporalHistory {
                           const std::vector<TemporalHistory> &targets,
                           bool completeTargets = true,
                           ObjectSet objects = ObjectSet::unknown());
+  /// Borrow several targets (an indirect call); their site tables are not copied.
+  static void connectCallTargets(TraceFlowGraph &graph,
+                                 const TemporalHistory &caller, SiteID site,
+                                 CallSiteID callSite,
+                                 const std::vector<const TemporalHistory *> &targets,
+                                 bool completeTargets = true,
+                                 ObjectSet objects = ObjectSet::unknown());
   /// Borrow a single target; native direct calls must not copy its site tables.
   static void connectDirectCall(TraceFlowGraph &graph,
                                 const TemporalHistory &caller, SiteID site,

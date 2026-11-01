@@ -210,6 +210,9 @@ struct ResourcePlan {
   ObjectSet universe = ObjectSet::unknown();
   std::map<const llvm::Instruction *, GuardedEventEffect> effects = {};
   std::vector<const llvm::CallBase *> calls = {};
+  /// Defined callees of indirect calls, resolved by the SVFG's pointer
+  /// analysis, in module order.
+  std::map<const llvm::CallBase *, std::vector<const llvm::Function *>> indirect = {};
   std::vector<std::string> issues = {};
   bool dense = false;
   bool keeps(const llvm::Instruction &instruction) const {
@@ -460,13 +463,21 @@ ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &modul
   std::map<const llvm::Instruction *, ObjectID> synthetic;
   ObjectID nextSynthetic = ObjectID(1) << 63;
   std::vector<std::pair<const llvm::Instruction *, Event>> eventSites;
+  for (const auto &function : module)
+    if (!function.isDeclaration())
+      for (const auto *call : svfg.getIndCallSitesInvokingCallee(&function))
+        plan.indirect[call].push_back(&function);
   for (const auto &function : module) for (const auto &block : function)
     for (const auto &instruction : block) {
       const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
       const auto *callee = call ? call->getCalledFunction() : nullptr;
       if (call) {
         plan.calls.push_back(call);
-        if (!callee || (callee->isDeclaration() && !callee->isIntrinsic()))
+        // A resolved indirect call is modeled by its callees' bodies, like a
+        // direct call; unresolved and external calls remain incomplete.
+        bool resolved = !callee && plan.indirect.count(call);
+        if (!resolved &&
+            (!callee || (callee->isDeclaration() && !callee->isIntrinsic())))
           plan.issues.push_back("call in " + function.getName().str() +
                                 " has no complete native effect model");
       }
@@ -644,7 +655,17 @@ void appendTemporalFacts(
   timer.finish("usetracessa_history");
   for (const auto *call : plan.calls) {
     const auto *callee = call->getCalledFunction();
-    if (!callee || !histories.count(callee))
+    std::vector<const TemporalHistory *> targets;
+    if (callee) {
+      if (histories.count(callee))
+        targets.push_back(&histories.at(callee));
+    } else if (auto resolved = plan.indirect.find(call);
+               resolved != plan.indirect.end()) {
+      for (const auto *target : resolved->second)
+        if (histories.count(target))
+          targets.push_back(&histories.at(target));
+    }
+    if (targets.empty())
       continue;
     const auto &caller = histories.at(call->getFunction());
     SiteID site = layouts.at(call->getFunction()).returned.at(call);
@@ -656,9 +677,9 @@ void appendTemporalFacts(
           "exceptional temporal call exits require edge-specific modeling");
       continue;
     }
-    TemporalHistory::connectDirectCall(result.graph, caller, site,
-                                       reinterpret_cast<std::uintptr_t>(call),
-                                       histories.at(callee));
+    TemporalHistory::connectCallTargets(result.graph, caller, site,
+                                        reinterpret_cast<std::uintptr_t>(call),
+                                        targets);
   }
   timer.finish("usetracessa_calls");
 }
