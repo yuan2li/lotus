@@ -453,6 +453,9 @@ def git_commit():
     commit = command_output(["git", "rev-parse", "HEAD"])
     if commit:
         return commit
+    # Container images have no .git; the Dockerfile records the build commit.
+    if os.environ.get("LOTUS_COMMIT"):
+        return os.environ["LOTUS_COMMIT"]
     # Fallback when git cannot run (e.g. an x86_64 Python on arm64 macOS).
     git = ROOT / ".git"
     try:
