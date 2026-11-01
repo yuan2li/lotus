@@ -5,6 +5,7 @@ oracle  Differential oracle (RQ4). For each program, client and object
         granularity, compare UseTraceSSA batch on the sparse graph (the
         reference) with every other UseTraceSSA configuration and with UFG:
         the status of every object and the set of (sink site, object) findings.
+        Runs with different points-to sets (--ptas) are compared separately.
         Reports the number of compared queries and lists every mismatch;
         exits with 1 when there is one.
 
@@ -86,7 +87,8 @@ def oracle(records):
     for record in records:
         if record["tool"] == "saber" or record.get("repeat", 0) != 0:
             continue
-        key = (benchmark(record), record["bug_type"], record["object_granularity"])
+        key = (benchmark(record), record["bug_type"], record["object_granularity"],
+               record.get("pta") or "andersen")
         groups.setdefault(key, []).append(record)
     compared = mismatches = 0
     for key in sorted(groups):
@@ -187,7 +189,7 @@ def saber_locations(record, report):
     return result
 
 
-def match(records, out, sample, seed, granularity="site"):
+def match(records, out, sample, seed, granularity="site", pta="andersen"):
     table = {}
     for record in records:
         if record.get("repeat", 0) != 0:
@@ -196,6 +198,8 @@ def match(records, out, sample, seed, granularity="site"):
                 record.get(name) == value for name, value in REFERENCE.items()):
             continue
         if record["tool"] != "saber" and record.get("object_granularity") != granularity:
+            continue
+        if record["tool"] != "saber" and (record.get("pta") or "andersen") != pta:
             continue
         details = json.loads(Path(record["details"]).read_text())
         sites = (saber_locations(record, details) if record["tool"] == "saber"
@@ -246,6 +250,8 @@ def main():
     match_parser.add_argument("--sample", type=int, default=0,
                               help="Locations sampled per program and client")
     match_parser.add_argument("--seed", type=int, default=2027)
+    match_parser.add_argument("--pta", choices=("andersen", "fspta"), default="andersen",
+                              help="UseTraceSSA/UFG points-to sets to match")
     match_parser.add_argument("--granularity", choices=("site", "abstract"),
                               default="site",
                               help="UseTraceSSA/UFG object granularity to match")
@@ -253,7 +259,7 @@ def main():
     records = load_records(args.results)
     if args.command == "oracle":
         return oracle(records)
-    return match(records, args.out, args.sample, args.seed, args.granularity)
+    return match(records, args.out, args.sample, args.seed, args.granularity, args.pta)
 
 
 if __name__ == "__main__":

@@ -32,6 +32,8 @@ Examples:
         --object-modes batch,fixed --object-granularities site,abstract
     python3 scripts/evaluate_usetracessa.py --tools usetracessa \
         --temporal-graphs sparse,icfg   # icfg is the IDE-ICFG configuration
+    python3 scripts/evaluate_usetracessa.py --tools usetracessa,ufg \
+        --ptas andersen,fspta           # pointer-analysis ablation
 """
 import argparse
 import concurrent.futures
@@ -62,6 +64,7 @@ SABER_SMT_CHECKS = ("double-free", "memory-leak", "file-leak")
 OBJECT_MODES = ("batch", "fixed")
 OBJECT_GRANULARITIES = ("site", "abstract")
 TEMPORAL_GRAPHS = ("sparse", "icfg")
+PTAS = ("andersen", "fspta")
 SVFG_MSSA_MODES = ("auto", "on", "off")
 BITCODE_MAGIC = (b"BC\xc0\xde", b"\xde\xc0\x17\x0b")
 KEY_VALUE = re.compile(r"([a-z][a-z0-9_]*)=([^\s]+)")
@@ -259,10 +262,12 @@ def parse_timing(stderr, parsed):
             except ValueError:
                 pass
     # Decision 4: compare analysis time without the shared frontend (parse and
-    # SVFG construction, including Saber's Memory SSA).
+    # SVFG construction, including Saber's Memory SSA, and the flow-sensitive
+    # points-to pre-analysis of the --pta=fspta ablation).
     if all(f"{key}_ms" in parsed for key in ("total", "parse", "svfg")):
         parsed["analysis_ms"] = round(
-            parsed["total_ms"] - parsed["parse_ms"] - parsed["svfg_ms"], 3)
+            parsed["total_ms"] - parsed["parse_ms"] - parsed["svfg_ms"] -
+            parsed.get("pta_ms", 0.0), 3)
 
 
 def parse_saber_output(stdout, stderr):
@@ -294,7 +299,7 @@ def build_cmd(task, binaries, context_limit, budgets=None,
                f"--check={bug_type}", f"--context={context_mode}",
                f"--context-limit={context_limit if context_limit is not None else 'unlimited'}",
                f"--object-granularity={task['object_granularity']}",
-               f"--svfg-mssa={task['svfg_mssa']}"]
+               f"--svfg-mssa={task['svfg_mssa']}", f"--pta={task['pta']}"]
         if tool == "usetracessa":
             cmd.append(f"--object-mode={task['object_mode']}")
             cmd.append(f"--temporal-graph={task['temporal_graph']}")
@@ -319,7 +324,7 @@ def build_cmd(task, binaries, context_limit, budgets=None,
 
 def make_tasks(benchmarks, tools, checks, object_modes=("batch",),
                granularities=("site",), svfg_mssa="auto", saber_smt=False,
-               temporal_graphs=("sparse",), repeat=1):
+               temporal_graphs=("sparse",), repeat=1, ptas=("andersen",)):
     """Expand tools into configurations; options that do not apply stay None.
     Repeats are the outer loop so that runs of one configuration are spread
     over the whole experiment."""
@@ -331,14 +336,15 @@ def make_tasks(benchmarks, tools, checks, object_modes=("batch",),
                     continue
                 for granularity in granularities:
                     utssa = tool == "usetracessa"
-                    for object_mode in (object_modes if utssa else (None,)):
-                        for temporal_graph in (temporal_graphs if utssa else (None,)):
-                            tasks.append({
-                                "tool": tool, "bug_type": bug_type, "bc_path": bc_path,
-                                "smt_mode": "nosmt", "object_mode": object_mode,
-                                "temporal_graph": temporal_graph,
-                                "object_granularity": granularity,
-                                "svfg_mssa": svfg_mssa})
+                    for pta in ptas:
+                        for object_mode in (object_modes if utssa else (None,)):
+                            for temporal_graph in (temporal_graphs if utssa else (None,)):
+                                tasks.append({
+                                    "tool": tool, "bug_type": bug_type, "bc_path": bc_path,
+                                    "smt_mode": "nosmt", "object_mode": object_mode,
+                                    "temporal_graph": temporal_graph,
+                                    "object_granularity": granularity,
+                                    "svfg_mssa": svfg_mssa, "pta": pta})
             if bug_type in SABER_CHECKS and "saber" in tools:
                 smt_modes = ("nosmt", "smt") if (
                     saber_smt and bug_type in SABER_SMT_CHECKS) else ("nosmt",)
@@ -347,7 +353,7 @@ def make_tasks(benchmarks, tools, checks, object_modes=("batch",),
                         "tool": "saber", "bug_type": bug_type, "bc_path": bc_path,
                         "smt_mode": smt_mode, "object_mode": None,
                         "temporal_graph": None, "object_granularity": None,
-                        "svfg_mssa": None})
+                        "svfg_mssa": None, "pta": None})
     return [dict(task, repeat=run) for run in range(repeat) for task in tasks]
 
 
@@ -355,6 +361,8 @@ def details_name(index, task):
     parts = [f"{index:05d}", task["bc_path"].name, task["tool"], task["bug_type"]]
     parts += [task[key] for key in ("smt_mode", "object_mode", "temporal_graph",
                                     "object_granularity") if task.get(key)]
+    if task.get("pta") not in (None, "andersen"):
+        parts.append(task["pta"])
     return "-".join(parts) + f"-r{task['repeat']}.json"
 
 
@@ -387,6 +395,7 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
         "temporal_graph": task["temporal_graph"],
         "object_granularity": task["object_granularity"],
         "svfg_mssa": task["svfg_mssa"],
+        "pta": task["pta"],
         "bc": bc_path.name, "bc_path": str(bc_path),
         "analysis_scope": ("context-bounded-icfg-candidate"
                            if tool == "saber" and bug_type == "use-after-free"
@@ -554,6 +563,10 @@ def main():
                         default=("site",),
                         help="UseTraceSSA/UFG resource objects: site, abstract, or both "
                              "(default: site)")
+    parser.add_argument("--ptas", type=choice_list(PTAS), default=("andersen",),
+                        help="UseTraceSSA/UFG points-to sets: andersen (the SVFG's), "
+                             "fspta (flow-sensitive over the same SVFG; ablation), or "
+                             "both (default: andersen)")
     parser.add_argument("--svfg-mssa", choices=SVFG_MSSA_MODES, default="auto",
                         help="UseTraceSSA/UFG SVFG Memory SSA (default: auto, off for "
                              "checks; on is a sensitivity configuration)")
@@ -652,7 +665,7 @@ def main():
 
     tasks = make_tasks(benchmarks, tools, args.checks, args.object_modes,
                        args.object_granularities, args.svfg_mssa, args.saber_smt,
-                       args.temporal_graphs, args.repeat)
+                       args.temporal_graphs, args.repeat, args.ptas)
     records = [None] * len(tasks)
     if args.details_dir:
         args.details_dir = args.details_dir.resolve()
@@ -668,7 +681,7 @@ def main():
     print(f"Checks: {','.join(args.checks)}  Object modes: {','.join(args.object_modes)}  "
           f"Temporal graphs: {','.join(args.temporal_graphs)}  "
           f"Granularities: {','.join(args.object_granularities)}  "
-          f"SVFG MSSA: {args.svfg_mssa}  Saber SMT: {'yes' if args.saber_smt else 'no'}")
+          f"PTA: {','.join(args.ptas)}  SVFG MSSA: {args.svfg_mssa}  Saber SMT: {'yes' if args.saber_smt else 'no'}")
     print(f"Timeout: {args.timeout:g}s  RSS limit: {args.mem_limit_gb:g} GiB")
     print(f"Context: {context_mode}; context limit: "
           f"{context_limit if context_limit is not None else 'unlimited'}")
@@ -699,7 +712,8 @@ def main():
                 f"{record['bug_type']:16s} {record['bc']:16s} r{record['repeat']} "
                 f"mode={record['smt_mode']}/{record['object_mode'] or '-'}/"
                 f"{record['temporal_graph'] or '-'}/"
-                f"{record['object_granularity'] or '-':8s} "
+                f"{record['object_granularity'] or '-':8s}"
+                f"{'/' + record['pta'] if record.get('pta') not in (None, 'andersen') else ''} "
                 f"total={record.get('total_ms')}ms "
                 f"rss={record['max_rss_mb']:8.1f}MiB "
                 f"result={record.get('check_result') or '-':8s} "
