@@ -18,6 +18,7 @@
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/raw_ostream.h>
 
@@ -210,7 +211,9 @@ struct ResourcePlan {
   std::map<const llvm::Instruction *, GuardedEventEffect> effects = {};
   std::vector<const llvm::CallBase *> calls = {};
   std::vector<std::string> issues = {};
+  bool dense = false;
   bool keeps(const llvm::Instruction &instruction) const {
+    if (dense) return !llvm::isa<llvm::DbgInfoIntrinsic>(instruction);
     return effects.count(&instruction) || structuralCall(instruction);
   }
 };
@@ -242,7 +245,8 @@ Layout makeResourceLayout(const llvm::Function &function, FunctionID id,
   };
   for (ID index = 0; index < blocks.size(); ++index) {
     const auto &block = *blocks[index];
-    bool keep = index == 0 || block.getTerminator()->getNumSuccessors() != 1;
+    bool keep = plan.dense || index == 0 ||
+                block.getTerminator()->getNumSuccessors() != 1;
     for (const auto &instruction : block)
       keep |= plan.keeps(instruction);
     if (keep)
@@ -668,8 +672,8 @@ SVFGHistoryResult buildUseTraceSSAFromLotusSVFG(const analysis::SVFG &svfg,
   SVFGConstructionInput input;
   std::map<const llvm::Function *, Layout> layouts;
   PhaseTimer timer(options);
-  const auto plan =
-      planResources(svfg, module, mode, options.allocationSiteObjects);
+  auto plan = planResources(svfg, module, mode, options.allocationSiteObjects);
+  plan.dense = options.denseControlFlow;
   timer.finish("usetracessa_plan");
   if (!plan.hasRequired) {
     SVFGHistoryResult result;

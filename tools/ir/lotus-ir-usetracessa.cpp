@@ -59,6 +59,11 @@ llvm::cl::opt<std::string> ObjectMode(
     llvm::cl::desc("--check search: batch (one mask-lifted scan) or fixed "
                    "(one same-object query per candidate)"),
     llvm::cl::init("batch"));
+llvm::cl::opt<std::string> TemporalGraph(
+    "temporal-graph",
+    llvm::cl::desc("--check temporal graph: sparse (event/call skeleton) or "
+                   "icfg (every instruction; the IDE-ICFG baseline)"),
+    llvm::cl::init("sparse"));
 llvm::cl::opt<bool> Quiet("quiet",
                            llvm::cl::desc("Suppress issue and witness details"));
 llvm::cl::opt<bool> FullLabels(
@@ -118,6 +123,10 @@ int main(int argc, char **argv) {
   }
   if (ObjectMode != "batch" && ObjectMode != "fixed") {
     llvm::errs() << "lotus-ir-usetracessa: --object-mode must be batch or fixed\n";
+    return 1;
+  }
+  if (TemporalGraph != "sparse" && TemporalGraph != "icfg") {
+    llvm::errs() << "lotus-ir-usetracessa: --temporal-graph must be sparse or icfg\n";
     return 1;
   }
   if (Format != "text" && Format != "json" && Format != "dot") {
@@ -181,6 +190,7 @@ int main(int argc, char **argv) {
     NativeHistoryOptions historyOptions;
     historyOptions.instructionText = Check.empty() || !Quiet || FullLabels;
     historyOptions.allocationSiteObjects = ObjectGranularity == "site";
+    historyOptions.denseControlFlow = TemporalGraph == "icfg";
     if (Timing)
       historyOptions.phaseTiming = [](const char *phase, double elapsed) {
         std::cerr << "timing_ms " << phase << '=' << elapsed << '\n';
@@ -255,6 +265,7 @@ int main(int argc, char **argv) {
       if (checkReport) {
         const auto &scan = *checkReport;
         std::cout << "check=" << Check << " object_mode=" << ObjectMode
+                  << " temporal_graph=" << TemporalGraph
                   << " result=" << statusName(scan.status)
                   << " findings=" << scan.findings.size()
                   << " finding_sites=" << findingGroups.size()
