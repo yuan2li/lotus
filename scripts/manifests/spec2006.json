@@ -1,0 +1,102 @@
+{
+  "suite": "SPEC CPU2006",
+  "note": "Placeholder until the benchmark set (B2.0) is decided; fill version and kloc (cloc) when built.",
+  "benchmarks": [
+    {
+      "name": "400.perlbench",
+      "bitcode": "benchmarks/real-world/SPEC2006/400.perlbench.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "401.bzip2",
+      "bitcode": "benchmarks/real-world/SPEC2006/401.bzip2.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "403.gcc",
+      "bitcode": "benchmarks/real-world/SPEC2006/403.gcc.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "429.mcf",
+      "bitcode": "benchmarks/real-world/SPEC2006/429.mcf.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "433.milc",
+      "bitcode": "benchmarks/real-world/SPEC2006/433.milc.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "435.gromacs",
+      "bitcode": "benchmarks/real-world/SPEC2006/435.gromacs.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "436.cactusADM",
+      "bitcode": "benchmarks/real-world/SPEC2006/436.cactusADM.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "445.gobmk",
+      "bitcode": "benchmarks/real-world/SPEC2006/445.gobmk.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "454.calculix",
+      "bitcode": "benchmarks/real-world/SPEC2006/454.calculix.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "456.hmmer",
+      "bitcode": "benchmarks/real-world/SPEC2006/456.hmmer.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "458.sjeng",
+      "bitcode": "benchmarks/real-world/SPEC2006/458.sjeng.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "462.libquantum",
+      "bitcode": "benchmarks/real-world/SPEC2006/462.libquantum.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "464.h264ref",
+      "bitcode": "benchmarks/real-world/SPEC2006/464.h264ref.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "470.lbm",
+      "bitcode": "benchmarks/real-world/SPEC2006/470.lbm.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "481.wrf",
+      "bitcode": "benchmarks/real-world/SPEC2006/481.wrf.bc",
+      "version": null,
+      "kloc": null
+    },
+    {
+      "name": "482.sphinx3",
+      "bitcode": "benchmarks/real-world/SPEC2006/482.sphinx3.bc",
+      "version": null,
+      "kloc": null
+    }
+  ]
+}
