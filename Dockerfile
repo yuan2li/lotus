@@ -30,7 +30,7 @@ ENV Z3_DIR=/usr
 # Set working directory
 WORKDIR /lotus
 
-# Copy source code
+# Copy source code (.dockerignore drops build trees, .git and benchmark bitcode)
 COPY . .
 
 # Create build directory and configure
@@ -45,6 +45,13 @@ RUN mkdir -p build && cd build && \
 
 # Build and install
 RUN cd build && make -j$(nproc) && make install
+
+# UseTraceSSA evaluation: the three tools the harness runs, in build/bin, where
+# scripts/evaluate_usetracessa.py looks by default.
+RUN mkdir -p /opt/lotus/build/bin && \
+    cp build/bin/lotus-ir-usetracessa build/bin/lotus-ir-ufg build/bin/lotus-check \
+       /opt/lotus/build/bin/ && \
+    cp -r config scripts /opt/lotus/
 
 # Runtime stage - minimal image with only runtime dependencies
 FROM ${baseimage} AS runtime
@@ -61,11 +68,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libz3-4 \
     python3 \
     llvm-14-runtime \
+    libllvm14 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed binaries and libraries from build stage
 COPY --from=build /usr/local/bin /usr/local/bin
 COPY --from=build /usr/local/lib /usr/local/lib
+
+# UseTraceSSA evaluation harness. Tools run from the Lotus root so that
+# config/*.spec are found; mount the benchmark bitcode (not redistributed) at
+# /opt/lotus/benchmarks, e.g.
+#   docker run -v $PWD/benchmarks:/opt/lotus/benchmarks lotus \
+#     python3 /opt/lotus/scripts/evaluate_usetracessa.py --preset smoke \
+#       --manifest /opt/lotus/scripts/manifests/spec-paper.json
+COPY --from=build /opt/lotus /opt/lotus
+ARG LOTUS_COMMIT=""
+ENV LOTUS_COMMIT=${LOTUS_COMMIT}
+ENV LOTUS_BIN_DIR=/opt/lotus/build/bin
+ENV LOTUS_BENCHMARKS_ROOT=/opt/lotus
 
 # Set library path
 ENV LD_LIBRARY_PATH=/usr/local/lib:${LD_LIBRARY_PATH}

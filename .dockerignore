@@ -1,0 +1,7 @@
+# Build trees, history and benchmark bitcode stay out of the image; mount the
+# benchmarks at run time (see Dockerfile). Pass the commit with
+# --build-arg LOTUS_COMMIT=$(git rev-parse HEAD).
+.git
+build
+build-*
+benchmarks/real-world
