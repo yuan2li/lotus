@@ -2,15 +2,21 @@
 """Compare UseTraceSSA, object-expanded UFG, and Saber on LLVM bitcode.
 
 UseTraceSSA, UFG, and Saber run double-free, use-after-free, memory-leak, and
-file-leak. Saber UAF and the IR leak clients report candidates without SMT path
-validation; the IR leak clients have limited ownership-escape modeling.
-Runs are serial by default so wall time and peak RSS are easier
-to compare; --max-workers enables throughput-oriented parallel runs.
+file-leak (select with --checks). Saber runs without SMT path validation by
+default; --saber-smt adds SMT runs for its leak, double-free, and file checks.
+The IR leak clients have limited ownership-escape modeling.
+Every tool reports split timings: parse, SVFG construction, and analysis
+(`analysis_ms` = total - parse - SVFG). Runs are serial by default so wall time
+and peak RSS are easier to compare; --max-workers enables throughput-oriented
+parallel runs. Tools run with the Lotus root as working directory so that
+config/*.spec are found.
 
 Examples:
     python3 scripts/evaluate_usetracessa.py
     python3 scripts/evaluate_usetracessa.py --tools usetracessa,ufg \
         --inputs /path/to/example.bc --results /tmp/example-eval.json
+    python3 scripts/evaluate_usetracessa.py --tools usetracessa \
+        --object-modes batch,fixed --object-granularities site,abstract
 """
 import argparse
 import concurrent.futures
@@ -32,7 +38,12 @@ DEFAULT_BINS = {
 }
 SHARED_CHECKS = ("double-free", "use-after-free", "memory-leak", "file-leak")
 SABER_CHECKS = ("double-free", "use-after-free", "memory-leak", "file-leak")
-SABER_SMT_MODES = (("smt", ()), ("nosmt", ("--saber.no-smt",)))
+# Saber's UAF checker has no SMT path validation.
+SABER_SMT_CHECKS = ("double-free", "memory-leak", "file-leak")
+OBJECT_MODES = ("batch", "fixed")
+OBJECT_GRANULARITIES = ("site", "abstract")
+SVFG_MSSA_MODES = ("auto", "on", "off")
+BITCODE_MAGIC = (b"BC\xc0\xde", b"\xde\xc0\x17\x0b")
 KEY_VALUE = re.compile(r"([a-z][a-z0-9_]*)=([^\s]+)")
 IR_BUDGETS = ("max-product-states", "max-summary-pairs")
 
@@ -52,6 +63,28 @@ def context_limit_value(text):
 
 def key_values(line):
     return dict(KEY_VALUE.findall(line))
+
+
+def choice_list(choices):
+    def parse(text):
+        values = tuple(part.strip() for part in text.split(",") if part.strip())
+        if not values or len(set(values)) != len(values) or any(
+                value not in choices for value in values):
+            raise argparse.ArgumentTypeError(
+                f"expected distinct comma-separated values from {','.join(choices)}")
+        return values
+    return parse
+
+
+def is_llvm_input(path):
+    """LLVM bitcode by magic (SPEC2017 files have no suffix) or textual .ll."""
+    if path.suffix == ".ll":
+        return True
+    try:
+        with path.open("rb") as handle:
+            return handle.read(4) in BITCODE_MAGIC
+    except OSError:
+        return False
 
 
 def get_process_rss_mb(pid):
@@ -103,7 +136,7 @@ def run_cmd_with_limits(cmd, timeout_s, mem_limit_gb):
         try:
             proc = subprocess.Popen(
                 cmd, stdout=stdout_file, stderr=stderr_file,
-                start_new_session=True,
+                start_new_session=True, cwd=ROOT,
             )
         except OSError as error:
             return {
@@ -178,6 +211,11 @@ def parse_ir_output(stdout, stderr):
             for key in ("budget_limit", "budget_observed"):
                 if key in fields:
                     parsed[key] = int(fields[key])
+    parse_timing(stderr, parsed)
+    return parsed
+
+
+def parse_timing(stderr, parsed):
     for line in stderr.splitlines():
         if not line.startswith("timing_ms "):
             continue
@@ -186,7 +224,11 @@ def parse_ir_output(stdout, stderr):
                 parsed[f"{key}_ms"] = float(value)
             except ValueError:
                 pass
-    return parsed
+    # Decision 4: compare analysis time without the shared frontend (parse and
+    # SVFG construction, including Saber's Memory SSA).
+    if all(f"{key}_ms" in parsed for key in ("total", "parse", "svfg")):
+        parsed["analysis_ms"] = round(
+            parsed["total_ms"] - parsed["parse_ms"] - parsed["svfg_ms"], 3)
 
 
 def parse_saber_output(stdout, stderr):
@@ -205,15 +247,21 @@ def parse_saber_output(stdout, stderr):
             parsed["findings"] = int(match.group(1))
         elif "No findings." in output:
             parsed["findings"] = 0
+    parse_timing(stderr, parsed)
     return parsed
 
 
-def build_cmd(tool, bug_type, smt_flags, bc_path, binaries,
-              context_limit, budgets=None, context_mode="sensitive", saber_budgets=None):
+def build_cmd(task, binaries, context_limit, budgets=None,
+              context_mode="sensitive", saber_budgets=None):
+    tool, bug_type, bc_path = task["tool"], task["bug_type"], task["bc_path"]
     if tool in ("usetracessa", "ufg"):
         cmd = [str(binaries[tool]), str(bc_path), "--quiet", "--timing",
                f"--check={bug_type}", f"--context={context_mode}",
-               f"--context-limit={context_limit if context_limit is not None else 'unlimited'}"]
+               f"--context-limit={context_limit if context_limit is not None else 'unlimited'}",
+               f"--object-granularity={task['object_granularity']}",
+               f"--svfg-mssa={task['svfg_mssa']}"]
+        if tool == "usetracessa":
+            cmd.append(f"--object-mode={task['object_mode']}")
         for flag in IR_BUDGETS:
             limit = (budgets or {}).get(flag, 0)
             cmd.append(f"--{flag}={limit if limit else 'unlimited'}")
@@ -221,34 +269,46 @@ def build_cmd(tool, bug_type, smt_flags, bc_path, binaries,
     if context_mode != "sensitive" or context_limit is None:
         raise ValueError("Saber requires context-sensitive search with a numeric context limit")
     return [str(binaries["saber"]), "--engine=saber",
-            f"--checks={bug_type}", "--analysis-stats",
+            f"--checks={bug_type}", "--analysis-stats", "--saber.timing",
             f"--saber.context-limit={context_limit}",
             *(f"--saber.{key}={value}" for key, value in (saber_budgets or {}).items()),
-            *smt_flags, str(bc_path)]
+            *(() if task["smt_mode"] == "smt" else ("--saber.no-smt",)),
+            str(bc_path)]
 
 
-def make_tasks(benchmarks, tools):
+def make_tasks(benchmarks, tools, checks, object_modes=("batch",),
+               granularities=("site",), svfg_mssa="auto", saber_smt=False):
+    """Expand tools into configurations; options that do not apply stay None."""
     tasks = []
     for bc_path in benchmarks:
-        for bug_type in SHARED_CHECKS:
+        for bug_type in checks:
             for tool in ("usetracessa", "ufg"):
-                if tool in tools:
-                    tasks.append((tool, bug_type, "nosmt", (), bc_path))
+                if tool not in tools:
+                    continue
+                for granularity in granularities:
+                    for object_mode in (object_modes if tool == "usetracessa"
+                                        else (None,)):
+                        tasks.append({
+                            "tool": tool, "bug_type": bug_type, "bc_path": bc_path,
+                            "smt_mode": "nosmt", "object_mode": object_mode,
+                            "object_granularity": granularity,
+                            "svfg_mssa": svfg_mssa})
             if bug_type in SABER_CHECKS and "saber" in tools:
-                if bug_type == "use-after-free":
-                    tasks.append(("saber", bug_type, "nosmt",
-                                  ("--saber.no-smt",), bc_path))
-                else:
-                    for label, flags in SABER_SMT_MODES:
-                        tasks.append(("saber", bug_type, label, flags, bc_path))
+                smt_modes = ("nosmt", "smt") if (
+                    saber_smt and bug_type in SABER_SMT_CHECKS) else ("nosmt",)
+                for smt_mode in smt_modes:
+                    tasks.append({
+                        "tool": "saber", "bug_type": bug_type, "bc_path": bc_path,
+                        "smt_mode": smt_mode, "object_mode": None,
+                        "object_granularity": None, "svfg_mssa": None})
     return tasks
 
 
 def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
                  context_limit, budgets=None, context_mode="sensitive", saber_budgets=None):
-    tool, bug_type, smt_label, smt_flags, bc_path = task
-    cmd = build_cmd(tool, bug_type, smt_flags, bc_path, binaries,
-                    context_limit, budgets, context_mode, saber_budgets)
+    tool, bug_type, bc_path = task["tool"], task["bug_type"], task["bc_path"]
+    cmd = build_cmd(task, binaries, context_limit, budgets, context_mode,
+                    saber_budgets)
     execution = run_cmd_with_limits(cmd, timeout_s, mem_limit_gb)
     parsed = (parse_saber_output(execution["stdout"], execution["stderr"])
               if tool == "saber" else
@@ -265,7 +325,10 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
             status = "PARSE_ERROR"
     record = {
         "task_id": index, "tool": tool, "bug_type": bug_type,
-        "smt_mode": smt_label,
+        "smt_mode": task["smt_mode"],
+        "object_mode": task["object_mode"],
+        "object_granularity": task["object_granularity"],
+        "svfg_mssa": task["svfg_mssa"],
         "bc": bc_path.name, "bc_path": str(bc_path),
         "analysis_scope": ("context-bounded-icfg-candidate"
                            if tool == "saber" and bug_type == "use-after-free"
@@ -337,6 +400,23 @@ def main():
                         help="Override Saber forward-item limit (0/unlimited disables it)")
     parser.add_argument("--saber-solver-timeout-ms", type=budget_value, default=None,
                         help="Override Saber per-solver timeout (0/unlimited disables it)")
+    parser.add_argument("--checks", type=choice_list(SHARED_CHECKS),
+                        default=SHARED_CHECKS,
+                        help="Comma-separated clients (default: all four; decision 2 "
+                             "reports memory-leak and file-leak as the leak client)")
+    parser.add_argument("--object-modes", type=choice_list(OBJECT_MODES),
+                        default=("batch",),
+                        help="UseTraceSSA search: batch, fixed, or both (default: batch)")
+    parser.add_argument("--object-granularities", type=choice_list(OBJECT_GRANULARITIES),
+                        default=("site",),
+                        help="UseTraceSSA/UFG resource objects: site, abstract, or both "
+                             "(default: site)")
+    parser.add_argument("--svfg-mssa", choices=SVFG_MSSA_MODES, default="auto",
+                        help="UseTraceSSA/UFG SVFG Memory SSA (default: auto, off for "
+                             "checks; on is a sensitivity configuration)")
+    parser.add_argument("--saber-smt", action="store_true",
+                        help="Also run Saber with SMT path validation for leak, "
+                             "double-free, and file checks (RQ4 only)")
     parser.add_argument("--benchmarks-dir", type=Path,
                         default=ROOT / "benchmarks/real-world/SPEC2017",
                         help="Directory containing LLVM bitcode files")
@@ -380,14 +460,19 @@ def main():
         if not directory.is_dir():
             parser.error(f"benchmark directory not found: {directory}")
         benchmarks = sorted(path for path in directory.iterdir()
-                            if path.is_file() and path.suffix in (".bc", ".ll"))
+                            if path.is_file() and not path.name.startswith(".")
+                            and is_llvm_input(path))
     if not benchmarks or any(not path.is_file() for path in benchmarks):
         parser.error("no valid benchmark bitcode files were selected")
 
-    tasks = make_tasks(benchmarks, tools)
+    tasks = make_tasks(benchmarks, tools, args.checks, args.object_modes,
+                       args.object_granularities, args.svfg_mssa, args.saber_smt)
     records = [None] * len(tasks)
     print(f"Benchmarks: {len(benchmarks)}  Tools: {','.join(tools)}")
     print(f"Tasks: {len(tasks)}  Workers: {args.max_workers}")
+    print(f"Checks: {','.join(args.checks)}  Object modes: {','.join(args.object_modes)}  "
+          f"Granularities: {','.join(args.object_granularities)}  "
+          f"SVFG MSSA: {args.svfg_mssa}  Saber SMT: {'yes' if args.saber_smt else 'no'}")
     print(f"Timeout: {args.timeout:g}s  RSS limit: {args.mem_limit_gb:g} GiB")
     print(f"Context: {context_mode}; context limit: "
           f"{context_limit if context_limit is not None else 'unlimited'}")
@@ -414,11 +499,13 @@ def main():
             print(
                 f"[{record['status']:12s}] {record['tool']:12s} "
                 f"{record['bug_type']:16s} {record['bc']:16s} "
-                f"mode={record['smt_mode']:9s} "
+                f"mode={record['smt_mode']}/{record['object_mode'] or '-'}/"
+                f"{record['object_granularity'] or '-':8s} "
                 f"time={record['wall_time_s']:8.3f}s "
                 f"rss={record['max_rss_mb']:8.1f}MiB "
                 f"result={record.get('check_result') or '-':8s} "
-                f"findings={record.get('findings')}",
+                f"findings={record.get('findings')} "
+                f"analysis={record.get('analysis_ms')}ms",
                 flush=True,
             )
     print(f"Done. Results saved to {args.results}")
