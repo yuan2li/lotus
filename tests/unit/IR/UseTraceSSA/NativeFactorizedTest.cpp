@@ -444,6 +444,44 @@ TEST(UseTraceSSANative, HeapPropertiesTrackHeapObjectsOnly) {
   EXPECT_EQ(all.excludedNonHeapObjects, 0u);
 }
 
+TEST(UseTraceSSANative, ReallocReleasesItsArgumentThenAllocates) {
+  llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
+  auto module = llvm::parseAssemblyString(R"IR(
+    declare i8* @malloc(i64)
+    declare i8* @realloc(i8*, i64)
+    declare void @free(i8*)
+    define void @grow() {
+      %old = call i8* @malloc(i64 8)
+      %new = call i8* @realloc(i8* %old, i64 16)
+      %stale = load i8, i8* %old
+      call void @free(i8* %old)
+      call void @free(i8* %new)
+      ret void
+    }
+  )IR", diagnostic, context);
+  ASSERT_TRUE(module);
+  lotus::analysis::SVFG svfg;
+  for (const auto &instruction : llvm::instructions(*module->getFunction("grow"))) {
+    if (instruction.getName() == "old") svfg.addObjectForValue(&instruction, 10);
+    if (instruction.getName() == "new") svfg.addObjectForValue(&instruction, 20);
+  }
+  // The realloc releases object 10, so the later free of %old is a double
+  // free of it; object 20 is freed once.
+  auto doubleFree = buildUseTraceSSAFromLotusSVFG(svfg, *module, NativeHistoryMode::DoubleFree);
+  EXPECT_EQ(doubleFree.graph.resourceCandidates(), std::vector<ObjectID>({10, 20}));
+  auto twice = DefectDetector(doubleFree.graph, 3).scan(DefectKind::DoubleFree);
+  ASSERT_EQ(twice.findings.size(), 1u);
+  EXPECT_EQ(twice.findings[0].objects, std::vector<ObjectID>({10}));
+  expectFixedMatchesBatch(doubleFree.graph, DefectKind::DoubleFree);
+  // Reading %old after the realloc uses the released object.
+  auto useAfterFree = buildUseTraceSSAFromLotusSVFG(svfg, *module, NativeHistoryMode::UseAfterFree);
+  auto stale = DefectDetector(useAfterFree.graph, 3).scan(DefectKind::UseAfterFree);
+  ASSERT_FALSE(stale.findings.empty());
+  for (const auto &finding : stale.findings)
+    EXPECT_EQ(finding.objects, std::vector<ObjectID>({10}));
+  expectFixedMatchesBatch(useAfterFree.graph, DefectKind::UseAfterFree);
+}
+
 TEST(UseTraceSSANative, CxxNewAndDeleteAreHeapEvents) {
   llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
   auto module = llvm::parseAssemblyString(R"IR(

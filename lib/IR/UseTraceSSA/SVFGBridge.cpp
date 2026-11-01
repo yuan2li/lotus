@@ -182,6 +182,18 @@ bool heapDeallocator(llvm::StringRef name) {
   return name == "free" || name.startswith("_ZdlPv") || name.startswith("_ZdaPv");
 }
 
+/// realloc releases its argument before the call returns a fresh allocation.
+bool heapReallocator(llvm::StringRef name) {
+  return name == "realloc" || name == "reallocf";
+}
+
+bool reallocation(const llvm::Instruction &instruction) {
+  const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+  const auto *callee = call ? call->getCalledFunction() : nullptr;
+  return callee && heapReallocator(callee->getName()) && call->arg_size() &&
+         call->getType()->isPointerTy();
+}
+
 Event resourceEvent(const llvm::Instruction &instruction, const ResourceProperty &property) {
   if (hasEvent(property.events, Event::Escape))
     if (const auto *ret = llvm::dyn_cast<llvm::ReturnInst>(&instruction))
@@ -197,11 +209,25 @@ Event resourceEvent(const llvm::Instruction &instruction, const ResourceProperty
   auto name = callee->getName();
   Event event = Event::None;
   if (heapDeallocator(name) && call->arg_size()) event = Event::Release;
-  if (heapAllocator(name) && call->getType()->isPointerTy())
+  if ((heapAllocator(name) || heapReallocator(name)) && call->getType()->isPointerTy())
     event = Event::Allocate;
   if (name == "fopen" && call->getType()->isPointerTy()) event = Event::Open;
   if (name == "fclose" && call->arg_size()) event = Event::Close;
   return hasEvent(property.events, event) ? event : Event::None;
+}
+
+/// The resource events of an instruction in program order: a reallocation
+/// releases its argument, then allocates its result.
+std::vector<Event> resourceEvents(const llvm::Instruction &instruction,
+                                  const ResourceProperty &property) {
+  std::vector<Event> events;
+  if (reallocation(instruction)) {
+    if (hasEvent(property.events, Event::Release)) events.push_back(Event::Release);
+    if (hasEvent(property.events, Event::Allocate)) events.push_back(Event::Allocate);
+  } else if (auto event = resourceEvent(instruction, property); event != Event::None) {
+    events.push_back(event);
+  }
+  return events;
 }
 
 bool structuralCall(const llvm::Instruction &instruction) {
@@ -213,15 +239,23 @@ bool structuralCall(const llvm::Instruction &instruction) {
   if (!callee || !callee->isDeclaration()) return true;
   if (callee->isIntrinsic()) return false;
   auto name = callee->getName();
-  return !heapAllocator(name) && !heapDeallocator(name) && name != "fopen" &&
-         name != "fclose";
+  return !heapAllocator(name) && !heapDeallocator(name) && !heapReallocator(name) &&
+         name != "fopen" && name != "fclose";
+}
+
+/// Whether an event applies before its instruction executes.
+bool applyBefore(const llvm::Instruction &instruction, Event event) {
+  return event == Event::Dereference ||
+         (event == Event::Release && reallocation(instruction));
 }
 
 struct ResourcePlan {
   ResourceProperty property;
   bool hasRequired = false;
   ObjectSet universe = ObjectSet::unknown();
-  std::map<const llvm::Instruction *, GuardedEventEffect> effects = {};
+  /// Effects keyed by instruction and whether they apply before it executes
+  /// (dereferences, and the release of a reallocation) or after it.
+  std::map<std::pair<const llvm::Instruction *, bool>, GuardedEventEffect> effects = {};
   std::vector<const llvm::CallBase *> calls = {};
   /// Defined callees of indirect calls, resolved by the SVFG's pointer
   /// analysis, in module order.
@@ -232,7 +266,13 @@ struct ResourcePlan {
   bool dense = false;
   bool keeps(const llvm::Instruction &instruction) const {
     if (dense) return !llvm::isa<llvm::DbgInfoIntrinsic>(instruction);
-    return effects.count(&instruction) || structuralCall(instruction);
+    return hasEffect(instruction) || structuralCall(instruction);
+  }
+  bool hasEffect(const llvm::Instruction &instruction) const {
+    return effects.count({&instruction, false}) || effects.count({&instruction, true});
+  }
+  bool hasEffectBefore(const llvm::Instruction &instruction) const {
+    return effects.count({&instruction, true});
   }
 };
 
@@ -305,13 +345,13 @@ Layout makeResourceLayout(const llvm::Function &function, FunctionID id,
       bool dereference = llvm::isa<llvm::LoadInst>(instruction) ||
                          llvm::isa<llvm::StoreInst>(instruction);
       SiteID returned = InvalidID;
-      if (structuralCall(instruction) && plan.effects.count(&instruction))
+      if (structuralCall(instruction) && plan.hasEffect(instruction))
         returned = program.addOperation(current, "returned " + labels.get(instruction));
-      SiteID site = program.addOperation(current,
-                           std::string(dereference ? "before " : "after ") +
-                           labels.get(instruction));
-      if (dereference) layout.before.emplace(&instruction, site);
-      else {
+      if (dereference || plan.hasEffectBefore(instruction))
+        layout.before.emplace(&instruction,
+                              program.addOperation(current, "before " + labels.get(instruction)));
+      if (!dereference) {
+        SiteID site = program.addOperation(current, "after " + labels.get(instruction));
         layout.after.emplace(&instruction, site);
         layout.returned.emplace(&instruction, returned == InvalidID ? site : returned);
       }
@@ -527,12 +567,12 @@ ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &modul
                                 " has no complete native effect model");
       }
       if (callee && !callee->isDeclaration()) called.insert(callee);
-      auto event = resourceEvent(instruction, plan.property);
-      if (event != Event::None)
+      for (auto event : resourceEvents(instruction, plan.property)) {
         eventSites.emplace_back(&instruction, event);
-      if (mode != NativeHistoryMode::Full && plan.property.exits &&
-          hasEvent(event, plan.property.sources))
-        synthetic.emplace(&instruction, nextSynthetic++);
+        if (mode != NativeHistoryMode::Full && plan.property.exits &&
+            hasEvent(event, plan.property.sources))
+          synthetic.emplace(&instruction, nextSynthetic++);
+      }
     }
   auto directAcquisition = [](const llvm::Value *pointer, auto matches) {
     const auto *call = llvm::dyn_cast<llvm::CallBase>(pointer->stripPointerCasts());
@@ -555,7 +595,10 @@ ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &modul
       pointer = hasEvent(event, Event::Allocate | Event::Open) ? &instruction :
                                                                call.getArgOperand(0);
       if ((mode == NativeHistoryMode::MemoryLeak && event == Event::Release &&
-           directAcquisition(pointer, heapAllocator)) ||
+           !reallocation(instruction) &&
+           directAcquisition(pointer, [](llvm::StringRef name) {
+             return heapAllocator(name) || heapReallocator(name);
+           })) ||
           (mode == NativeHistoryMode::FileLeak && event == Event::Close &&
            directAcquisition(pointer, [](llvm::StringRef name) { return name == "fopen"; })))
         certainty = Certainty::Must;
@@ -603,7 +646,8 @@ ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &modul
     unknownSources |= effect.objects.isUnknown();
     candidates.insert(candidates.end(), effect.objects.objects().begin(),
                       effect.objects.objects().end());
-    plan.effects.emplace(&instruction, std::move(effect));
+    plan.effects.emplace(std::make_pair(&instruction, applyBefore(instruction, event)),
+                         std::move(effect));
   }
   if (!plan.hasRequired) return plan;
   if (!unknownSources) plan.universe = ObjectSet::known(std::move(candidates));
@@ -619,7 +663,8 @@ ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &modul
       continue;
     auto effect = effectFor(instruction, event);
     if (!effect.objects.empty())
-      plan.effects.emplace(&instruction, std::move(effect));
+      plan.effects.emplace(std::make_pair(&instruction, applyBefore(instruction, event)),
+                           std::move(effect));
   }
   return plan;
 }
@@ -637,7 +682,7 @@ void appendTemporalFacts(
   std::unordered_map<const llvm::Instruction *, NativeID> provenance;
   provenance.reserve(plan.effects.size());
   for (const auto &effect : plan.effects)
-    provenance.emplace(effect.first, NoNativeID);
+    provenance.emplace(effect.first.first, NoNativeID);
   if (!provenance.empty())
     for (const auto &item : svfg)
       if (const auto *instruction = anchor(*item.second)) {
@@ -646,11 +691,11 @@ void appendTemporalFacts(
           it->second = std::min<NativeID>(it->second, item.second->getId());
       }
   for (const auto &entry : plan.effects) {
-    const auto *instruction = entry.first;
+    const auto *instruction = entry.first.first;
     const auto &effect = entry.second;
     const auto &layout = layouts.at(instruction->getFunction());
-    SiteID site = effect.events == Event::Dereference ? layout.before.at(instruction) :
-                                                       layout.after.at(instruction);
+    SiteID site = entry.first.second ? layout.before.at(instruction) :
+                                       layout.after.at(instruction);
     auto native = provenance.find(instruction);
     effects[instruction->getFunction()].push_back({site, effect.objects, effect.events,
         effect.certainty, native == provenance.end() ? NoNativeID : native->second});
@@ -682,15 +727,14 @@ void appendTemporalFacts(
     histories.emplace(item.first, std::move(history));
   }
   for (const auto &effect : plan.effects) {
-    const auto *instruction = effect.first;
+    const auto *instruction = effect.first.first;
     const auto &location = instruction->getDebugLoc();
     if (!location)
       continue;
     const auto &layout = layouts.at(instruction->getFunction());
     const auto &history = histories.at(instruction->getFunction());
-    SiteID site = effect.second.events == Event::Dereference
-                      ? layout.before.at(instruction)
-                      : layout.after.at(instruction);
+    SiteID site = effect.first.second ? layout.before.at(instruction)
+                                      : layout.after.at(instruction);
     if (!result.graph.layer(history.id)
              .history.use(history.sites.at(site), history.execution))
       continue;
