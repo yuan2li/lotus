@@ -10,9 +10,13 @@ oracle  Differential oracle (RQ4). For each program, client and object
 
 match   Cross-tool alert matching and a manual sampling list. Aligns
         UseTraceSSA, UFG and Saber reports by source file and line: the sink
-        for double-free and use-after-free, the allocation (witness source)
-        for leaks, which needs --witnesses. Writes a CSV with one row per
-        location and the tools reporting it, plus a seeded random sample.
+        for use-after-free, and the allocation for double-free and leaks,
+        because Saber reports those once per allocation (all its double-free
+        diagnostic steps are the allocation). UseTraceSSA/UFG allocations come
+        from the exported object locations; older results without them fall
+        back to the sink (double-free) or the witness source (leaks, needs
+        --witnesses). Writes a CSV with one row per location and the tools
+        reporting it, plus a seeded random sample.
 
 Examples:
     python3 scripts/compare_usetracessa.py oracle eval_results.json
@@ -29,6 +33,8 @@ import sys
 
 REFERENCE = {"tool": "usetracessa", "object_mode": "batch", "temporal_graph": "sparse"}
 LEAKS = ("memory-leak", "file-leak")
+# Saber reports these once per allocation; align every tool by allocation.
+BY_ALLOCATION = LEAKS + ("double-free",)
 
 
 def load_records(paths):
@@ -55,6 +61,24 @@ def config_name(record):
 def findings(details):
     return {(finding["site"], obj) for finding in details["findings"]
             for obj in finding["objects"]}
+
+
+def keyed(details):
+    """Run-independent (key, status) and (site, key) multisets, or None for
+    results written before the tools exported object keys."""
+    if any("key" not in o for o in details["objects"]):
+        return None
+    return (Counter((o["key"], o["status"]) for o in details["objects"]),
+            Counter((finding["site"], key) for finding in details["findings"]
+                    for key in finding.get("object_keys", [])))
+
+
+def multiset_diffs(expected, actual, what, other):
+    diffs = [f"{what} only in reference: {item} x{count}"
+             for item, count in sorted((expected - actual).items())]
+    diffs += [f"{what} only in {other}: {item} x{count}"
+              for item, count in sorted((actual - expected).items())]
+    return diffs
 
 
 def oracle(records):
@@ -85,8 +109,17 @@ def oracle(records):
             queries = max(len(statuses), len(actual_statuses))
             compared += queries
             note = ""
-            if set(statuses) != set(actual_statuses) and len(statuses) == len(actual_statuses):
-                # Abstract SVFG object IDs are not stable across processes;
+            expected_keys, actual_keys = keyed(expected), keyed(actual)
+            if (set(statuses) != set(actual_statuses) and expected_keys and actual_keys):
+                # Abstract SVFG object IDs can differ between processes; the
+                # exported keys name objects independently of the run.
+                note = " (object IDs differ between runs; compared by object keys)"
+                diffs = multiset_diffs(expected_keys[0], actual_keys[0], "object",
+                                       config_name(run))
+                diffs += multiset_diffs(expected_keys[1], actual_keys[1], "finding",
+                                        config_name(run))
+            elif set(statuses) != set(actual_statuses) and len(statuses) == len(actual_statuses):
+                # Results without object keys: abstract SVFG object IDs are not stable;
                 # site-granularity IDs are. Compare what does not name objects.
                 note = " (object IDs differ between runs; compared by status counts)"
                 diffs = [f"{status} objects: {count} vs "
@@ -127,8 +160,12 @@ def location(text):
 
 def ir_locations(record, details):
     result = set()
+    allocated = {o["object"]: o.get("location") for o in details["objects"]}
     for finding in details["findings"]:
-        if record["bug_type"] in LEAKS:
+        sites = [allocated.get(obj) for obj in finding["objects"]]
+        if record["bug_type"] in BY_ALLOCATION and sites and all(sites):
+            result.update(location("x:" + site + ":0") for site in sites)
+        elif record["bug_type"] in LEAKS:
             steps = [step for step in finding.get("witness", []) if step["location"]]
             if steps:
                 result.add(location("x:" + steps[0]["location"]))
@@ -145,7 +182,7 @@ def saber_locations(record, report):
             steps = [step for step in bug.get("DiagSteps", []) if step.get("Line")]
             if not steps or not bug.get("Valid", True):
                 continue
-            step = steps[0] if record["bug_type"] in LEAKS else steps[-1]
+            step = steps[0] if record["bug_type"] in BY_ALLOCATION else steps[-1]
             result.add(f"{Path(step['File']).name}:{step['Line']}")
     return result
 
