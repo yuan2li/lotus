@@ -13,6 +13,32 @@
 
 using namespace lotus::usetracessa;
 namespace {
+// Fixed-object scans must agree with the mask-lifted batch scan on every sink,
+// object and per-object status, with eager and deferred witnesses.
+void expectFixedMatchesBatch(const TraceFlowGraph &graph, DefectKind kind) {
+  for (bool witnesses : {true, false}) {
+    DefectScanOptions batchOptions{witnesses, true, false, true};
+    DefectScanOptions fixedOptions = batchOptions;
+    fixedOptions.fixedObjects = true;
+    auto batch = DefectDetector(graph, 3).scan(kind, batchOptions);
+    auto fixed = DefectDetector(graph, 3).scan(kind, fixedOptions);
+    EXPECT_EQ(fixed.status, batch.status);
+    EXPECT_EQ(fixed.exhaustive, batch.exhaustive);
+    EXPECT_EQ(fixed.statistics.candidateObjects, batch.statistics.candidateObjects);
+    EXPECT_EQ(fixed.statistics.foundObjects, batch.statistics.foundObjects);
+    EXPECT_EQ(fixed.statistics.notFoundObjects, batch.statistics.notFoundObjects);
+    EXPECT_EQ(fixed.statistics.unknownObjects, batch.statistics.unknownObjects);
+    ASSERT_EQ(fixed.findings.size(), batch.findings.size());
+    for (std::size_t i = 0; i < fixed.findings.size(); ++i) {
+      EXPECT_EQ(fixed.findings[i].sink, batch.findings[i].sink);
+      EXPECT_EQ(fixed.findings[i].objects, batch.findings[i].objects);
+      auto witness = fixed.materialize(i, graph);
+      ASSERT_TRUE(witness.result.found());
+      EXPECT_EQ(witness.result.nodes.back(), fixed.findings[i].sink);
+    }
+  }
+}
+
 TEST(UseTraceSSANative, LabelsPreserveUnnamedValuesAndMetadata) {
   llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
   auto module = llvm::parseAssemblyString(R"IR(
@@ -174,6 +200,7 @@ TEST(UseTraceSSANative, PropertySelectsEventsSitesAndObjectUniverse) {
                 mode == NativeHistoryMode::UseAfterFree ? DefectKind::UseAfterFree :
                 mode == NativeHistoryMode::MemoryLeak ? DefectKind::MemoryLeak : DefectKind::FileLeak;
     EXPECT_EQ(DefectDetector(result.graph, 3).scan(kind).status, QueryStatus::Found);
+    expectFixedMatchesBatch(result.graph, kind);
     if (mode == NativeHistoryMode::DoubleFree || mode == NativeHistoryMode::UseAfterFree) {
       auto expected = DefectDetector(full.graph, 3).scan(kind);
       auto actual = DefectDetector(result.graph, 3).scan(kind);
@@ -221,6 +248,7 @@ TEST(UseTraceSSANative, AllocationSiteGranularityMergesAbstractCopies) {
   auto scan = DefectDetector(merged.graph, 3).scan(DefectKind::DoubleFree);
   ASSERT_EQ(scan.findings.size(), 1u);
   EXPECT_EQ(scan.findings.front().objects, std::vector<ObjectID>({10}));
+  expectFixedMatchesBatch(merged.graph, DefectKind::DoubleFree);
 
   NativeHistoryOptions abstractObjects;
   abstractObjects.allocationSiteObjects = false;

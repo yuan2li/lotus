@@ -62,6 +62,9 @@ struct Query {
   std::size_t maxSummaryPairs = 0;
   /// Rendering limit only: truncating evidence does not interrupt the search.
   std::size_t maxWitnessEdges = 1000000;
+  /// runToSinks only: false records each accepted sink without reconstructing
+  /// its evidence path (count-only scans).
+  bool scanWitnesses = true;
 };
 
 inline void SearchLimits::apply(Query &query) const {

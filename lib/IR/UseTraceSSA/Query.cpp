@@ -315,8 +315,17 @@ QueryResult QueryEngine::runImpl(const Query &q, QueryScanResult *scan) const {
       return evidence;
     };
     if (scan) {
-      for (const auto &sink : acceptedSinks)
-        scan->foundAt.emplace(sink.first, witness(sink.second));
+      for (const auto &sink : acceptedSinks) {
+        if (q.scanWitnesses) {
+          scan->foundAt.emplace(sink.first, witness(sink.second));
+          continue;
+        }
+        QueryResult hit;
+        hit.status = QueryStatus::Found;
+        hit.completion = result.completion;
+        hit.witnessComplete = false;
+        scan->foundAt.emplace(sink.first, std::move(hit));
+      }
     } else result = witness(accepted);
     return result;
   }
@@ -531,8 +540,17 @@ QueryResult QueryEngine::runImpl(const Query &q, QueryScanResult *scan) const {
     return evidence;
   };
   if (scan) {
-    for (const auto &sink : acceptedSinks)
-      scan->foundAt.emplace(sink.first, witness(sink.second));
+    for (const auto &sink : acceptedSinks) {
+      if (q.scanWitnesses) {
+        scan->foundAt.emplace(sink.first, witness(sink.second));
+        continue;
+      }
+      QueryResult hit;
+      hit.status = QueryStatus::Found;
+      hit.completion = result.completion;
+      hit.witnessComplete = false;
+      scan->foundAt.emplace(sink.first, std::move(hit));
+    }
   } else result = witness(accepted);
   return result;
 }

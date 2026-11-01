@@ -133,6 +133,13 @@ DefectScan DefectDetector::scanImpl(DefectKind kind, bool firstOnly,
   q.sinkEvents = target;
   using Clock = std::chrono::steady_clock;
   const auto searchStarted = Clock::now();
+  if (options.fixedObjects) {
+    scanFixedObjects(kind, q, firstOnly, options, scan);
+    scan.searchMilliseconds =
+        std::chrono::duration<double, std::milli>(Clock::now() - searchStarted)
+            .count();
+    return scan;
+  }
   auto batch = QueryEngine(Graph).runObjects(
       {q, candidates(Graph),
        options.materializeWitnesses || options.retainWitnesses,
@@ -254,6 +261,69 @@ DefectScan DefectDetector::scanImpl(DefectKind kind, bool firstOnly,
       std::chrono::duration<double, std::milli>(Clock::now() - reportStarted)
           .count();
   return scan;
+}
+void DefectDetector::scanFixedObjects(DefectKind kind, Query q, bool firstOnly,
+                                      const DefectScanOptions &options,
+                                      DefectScan &scan) const {
+  // One independent query per object: each object pays its own traversal,
+  // which is the P_fixed = R baseline for the batch scan.
+  const auto universe = candidates(Graph);
+  auto &stats = scan.statistics;
+  stats.candidateObjects = universe.objects().size();
+  std::map<FlowNodeID, std::vector<ObjectID>> objectsAtSink;
+  std::map<FlowNodeID, QueryResult> witnessAtSink;
+  bool stopped = false;
+  q.scanWitnesses = options.materializeWitnesses;
+  for (ObjectID object : universe.objects()) {
+    if (stopped) {
+      ++stats.unknownObjects;
+      continue;
+    }
+    q.memoryObject = object;
+    auto answer = QueryEngine(Graph).runToSinks(q);
+    scan.completion.merge(answer.completion);
+    stats.productStates += answer.productStates;
+    stats.edgesExamined += answer.edgesExamined;
+    stats.summaryPairs += answer.summaryPairs;
+    if (!answer.foundAt.empty()) ++stats.foundObjects;
+    else if (answer.complete) ++stats.notFoundObjects;
+    else ++stats.unknownObjects;
+    if (!answer.complete) scan.exhaustive = false;
+    for (auto &found : answer.foundAt) {
+      objectsAtSink[found.first].push_back(object);
+      witnessAtSink.emplace(found.first, std::move(found.second));
+    }
+    if (firstOnly && !answer.foundAt.empty()) {
+      stopped = true;
+      scan.exhaustive = false;
+    }
+  }
+  for (auto &sink : objectsAtSink) {
+    DefectReport report;
+    if (options.materializeWitnesses)
+      report = makeReport(Graph, kind, std::move(witnessAtSink.at(sink.first)));
+    else {
+      report.kind = kind;
+      report.result.status = QueryStatus::Found;
+      report.result.completion = scan.completion;
+      report.result.witnessComplete = false;
+    }
+    report.sink = sink.first;
+    report.witnessObject = sink.second.front();
+    report.objectCount = sink.second.size();
+    if (options.retainObjects || options.materializeWitnesses)
+      report.objects = std::move(sink.second);
+    scan.findings.push_back(std::move(report));
+    if (firstOnly) break;
+  }
+  scan.exhaustive = scan.exhaustive && scan.completion.complete();
+  scan.status = !scan.findings.empty() ? QueryStatus::Found
+                : scan.exhaustive      ? QueryStatus::NotFound
+                                       : QueryStatus::Unknown;
+  if (options.retainWitnesses && !options.materializeWitnesses) {
+    q.scanWitnesses = true;
+    scan.WitnessQuery = q;
+  }
 }
 } // namespace usetracessa
 } // namespace lotus

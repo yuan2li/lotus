@@ -54,6 +54,11 @@ llvm::cl::opt<std::string> ObjectGranularity(
     llvm::cl::desc("Resource objects: site (merge per allocation site) or "
                    "abstract (SVFG object IDs)"),
     llvm::cl::init("site"));
+llvm::cl::opt<std::string> ObjectMode(
+    "object-mode",
+    llvm::cl::desc("--check search: batch (one mask-lifted scan) or fixed "
+                   "(one same-object query per candidate)"),
+    llvm::cl::init("batch"));
 llvm::cl::opt<bool> Quiet("quiet",
                            llvm::cl::desc("Suppress issue and witness details"));
 llvm::cl::opt<bool> FullLabels(
@@ -109,6 +114,10 @@ int main(int argc, char **argv) {
   }
   if (ObjectGranularity != "site" && ObjectGranularity != "abstract") {
     llvm::errs() << "lotus-ir-usetracessa: --object-granularity must be site or abstract\n";
+    return 1;
+  }
+  if (ObjectMode != "batch" && ObjectMode != "fixed") {
+    llvm::errs() << "lotus-ir-usetracessa: --object-mode must be batch or fixed\n";
     return 1;
   }
   if (Format != "text" && Format != "json" && Format != "dot") {
@@ -190,9 +199,11 @@ int main(int argc, char **argv) {
                         Check == "use-after-free" ? DefectKind::UseAfterFree :
                         Check == "memory-leak" ? DefectKind::MemoryLeak :
                                                  DefectKind::FileLeak;
+      DefectScanOptions scanOptions{!Quiet, !Quiet, false, !Quiet};
+      scanOptions.fixedObjects = ObjectMode == "fixed";
       checkReport = DefectDetector(result.graph, options.depth, options.limits,
                                    options.mode)
-                        .scan(kind, {!Quiet, !Quiet, false, !Quiet});
+                        .scan(kind, scanOptions);
       completion.merge(checkReport->completion);
       if (Timing)
         std::cerr << "timing_ms check_search="
@@ -243,7 +254,8 @@ int main(int argc, char **argv) {
           std::cout << "issue: " << issue << '\n';
       if (checkReport) {
         const auto &scan = *checkReport;
-        std::cout << "check=" << Check << " result=" << statusName(scan.status)
+        std::cout << "check=" << Check << " object_mode=" << ObjectMode
+                  << " result=" << statusName(scan.status)
                   << " findings=" << scan.findings.size()
                   << " finding_sites=" << findingGroups.size()
                   << " exhaustive=" << (scan.exhaustive ? "yes" : "no");
