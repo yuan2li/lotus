@@ -41,6 +41,19 @@ llvm::cl::opt<std::string> Check("check",
                                  llvm::cl::init(""));
 llvm::cl::opt<bool> Timing("timing",
                             llvm::cl::desc("Print analysis phase timings to stderr"));
+llvm::cl::opt<std::string> SVFGMemorySSA(
+    "svfg-mssa",
+    llvm::cl::desc("SVFG Memory SSA: auto (off for --check), on, or off"),
+    llvm::cl::init("auto"));
+llvm::cl::opt<bool> SVFGPointerOnly(
+    "svfg-pointer-only",
+    llvm::cl::desc("Keep only pointer-typed SVFG value flows (default: true)"),
+    llvm::cl::init(true));
+llvm::cl::opt<std::string> ObjectGranularity(
+    "object-granularity",
+    llvm::cl::desc("Resource objects: site (merge per allocation site) or "
+                   "abstract (SVFG object IDs)"),
+    llvm::cl::init("site"));
 llvm::cl::opt<bool> Quiet("quiet",
                            llvm::cl::desc("Suppress issue and witness details"));
 cli::QueryOptionsParser QueryOptionFlags;
@@ -91,6 +104,14 @@ int main(int argc, char **argv) {
     llvm::errs() << "lotus-ir-ufg: supply both --source-node and --sink-node\n";
     return 1;
   }
+  if (SVFGMemorySSA != "auto" && SVFGMemorySSA != "on" && SVFGMemorySSA != "off") {
+    llvm::errs() << "lotus-ir-ufg: --svfg-mssa must be auto, on, or off\n";
+    return 1;
+  }
+  if (ObjectGranularity != "site" && ObjectGranularity != "abstract") {
+    llvm::errs() << "lotus-ir-ufg: --object-granularity must be site or abstract\n";
+    return 1;
+  }
   if (Format != "text" && Format != "json" && Format != "dot") {
     llvm::errs() << "lotus-ir-ufg: --format must be text, json, or dot\n";
     return 1;
@@ -129,7 +150,9 @@ int main(int argc, char **argv) {
     icfgBuilder.build(module.get());
     SVFGBuilderConfig config;
     config.usePointerAnalysis = true;
-    config.buildMSSA = Check.empty();
+    config.buildMSSA = SVFGMemorySSA == "on" ||
+                       (SVFGMemorySSA == "auto" && Check.empty());
+    config.pointerOnly = SVFGPointerOnly;
     config.resolveIndirectCalls = true;
     SVFGBuilder builder(config);
     std::unique_ptr<SVFG> svfg(builder.build(&icfg));
@@ -140,7 +163,10 @@ int main(int argc, char **argv) {
                              Check == "memory-leak" ? NativeHistoryMode::MemoryLeak :
                              Check == "file-leak" ? NativeHistoryMode::FileLeak :
                                                           NativeHistoryMode::Full;
-    auto result = buildUseTraceSSAFromLotusSVFG(*svfg, *module, mode);
+    NativeHistoryOptions historyOptions;
+    historyOptions.allocationSiteObjects = ObjectGranularity == "site";
+    auto result =
+        buildUseTraceSSAFromLotusSVFG(*svfg, *module, mode, historyOptions);
     const auto builtShared = Clock::now();
     lotus::ufg::UFGGraph expanded(result.graph);
     const auto builtHistory = Clock::now();

@@ -41,6 +41,19 @@ llvm::cl::opt<std::string> Check("check",
                                  llvm::cl::init(""));
 llvm::cl::opt<bool> Timing("timing",
                             llvm::cl::desc("Print analysis phase timings to stderr"));
+llvm::cl::opt<std::string> SVFGMemorySSA(
+    "svfg-mssa",
+    llvm::cl::desc("SVFG Memory SSA: auto (off for --check), on, or off"),
+    llvm::cl::init("auto"));
+llvm::cl::opt<bool> SVFGPointerOnly(
+    "svfg-pointer-only",
+    llvm::cl::desc("Keep only pointer-typed SVFG value flows (default: true)"),
+    llvm::cl::init(true));
+llvm::cl::opt<std::string> ObjectGranularity(
+    "object-granularity",
+    llvm::cl::desc("Resource objects: site (merge per allocation site) or "
+                   "abstract (SVFG object IDs)"),
+    llvm::cl::init("site"));
 llvm::cl::opt<bool> Quiet("quiet",
                            llvm::cl::desc("Suppress issue and witness details"));
 llvm::cl::opt<bool> FullLabels(
@@ -90,6 +103,14 @@ int main(int argc, char **argv) {
     llvm::errs() << "lotus-ir-usetracessa: supply both --source-node and --sink-node\n";
     return 1;
   }
+  if (SVFGMemorySSA != "auto" && SVFGMemorySSA != "on" && SVFGMemorySSA != "off") {
+    llvm::errs() << "lotus-ir-usetracessa: --svfg-mssa must be auto, on, or off\n";
+    return 1;
+  }
+  if (ObjectGranularity != "site" && ObjectGranularity != "abstract") {
+    llvm::errs() << "lotus-ir-usetracessa: --object-granularity must be site or abstract\n";
+    return 1;
+  }
   if (Format != "text" && Format != "json" && Format != "dot") {
     llvm::errs() << "lotus-ir-usetracessa: --format must be text, json, or dot\n";
     return 1;
@@ -134,7 +155,9 @@ int main(int argc, char **argv) {
     icfgBuilder.build(module.get());
     SVFGBuilderConfig config;
     config.usePointerAnalysis = true;
-    config.buildMSSA = Check.empty();
+    config.buildMSSA = SVFGMemorySSA == "on" ||
+                       (SVFGMemorySSA == "auto" && Check.empty());
+    config.pointerOnly = SVFGPointerOnly;
     config.resolveIndirectCalls = true;
     SVFGBuilder builder(config);
     std::unique_ptr<SVFG> svfg(builder.build(&icfg));
@@ -148,6 +171,7 @@ int main(int argc, char **argv) {
                                                           NativeHistoryMode::Full;
     NativeHistoryOptions historyOptions;
     historyOptions.instructionText = Check.empty() || !Quiet || FullLabels;
+    historyOptions.allocationSiteObjects = ObjectGranularity == "site";
     if (Timing)
       historyOptions.phaseTiming = [](const char *phase, double elapsed) {
         std::cerr << "timing_ms " << phase << '=' << elapsed << '\n';
