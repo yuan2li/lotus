@@ -2,10 +2,12 @@
 #include "IR/UseTraceSSA/LLVMImporter.h"
 #include "IR/UseTraceSSA/SVFGBridge.h"
 
+#include <algorithm>
 #include <sstream>
 
 #include <gtest/gtest.h>
 #include <llvm/AsmParser/Parser.h>
+#include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -347,6 +349,49 @@ TEST(UseTraceSSANative, ResolvedIndirectCallsJoinTheHistory) {
   ASSERT_EQ(after.findings.size(), 1u);
   EXPECT_EQ(after.findings[0].objects, std::vector<ObjectID>({10}));
   expectFixedMatchesBatch(resolved.graph, DefectKind::UseAfterFree);
+}
+
+TEST(UseTraceSSANative, CxxNewAndDeleteAreHeapEvents) {
+  llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
+  auto module = llvm::parseAssemblyString(R"IR(
+    declare i8* @_Znwm(i64)
+    declare i8* @_Znam(i64)
+    declare i8* @_ZnwmPv(i64, i8*)
+    declare void @_ZdlPv(i8*)
+    declare void @_ZdaPv(i8*)
+    define void @twice() {
+      %object = call i8* @_Znwm(i64 8)
+      call void @_ZdlPv(i8* %object)
+      call void @_ZdlPv(i8* %object)
+      ret void
+    }
+    define void @array() {
+      %array = call i8* @_Znam(i64 8)
+      call void @_ZdaPv(i8* %array)
+      %placed = call i8* @_ZnwmPv(i64 8, i8* %array)
+      ret void
+    }
+  )IR", diagnostic, context);
+  ASSERT_TRUE(module);
+  lotus::analysis::SVFG svfg;
+  for (const auto &function : *module) for (const auto &instruction : llvm::instructions(function)) {
+    if (instruction.getName() == "object") svfg.addObjectForValue(&instruction, 10);
+    if (instruction.getName() == "array" || instruction.getName() == "placed")
+      svfg.addObjectForValue(&instruction, 20);
+  }
+  auto doubleFree = buildUseTraceSSAFromLotusSVFG(svfg, *module, NativeHistoryMode::DoubleFree);
+  // Placement new (_ZnwmPv) reuses storage and is not an allocation.
+  EXPECT_EQ(doubleFree.graph.resourceCandidates(), std::vector<ObjectID>({10, 20}));
+  auto scan = DefectDetector(doubleFree.graph, 3).scan(DefectKind::DoubleFree);
+  ASSERT_EQ(scan.findings.size(), 1u);
+  EXPECT_EQ(scan.findings[0].objects, std::vector<ObjectID>({10}));
+  expectFixedMatchesBatch(doubleFree.graph, DefectKind::DoubleFree);
+
+  // delete[] releases the array object, so the leak check finds no leak for it.
+  auto leak = buildUseTraceSSAFromLotusSVFG(svfg, *module, NativeHistoryMode::MemoryLeak);
+  auto leaks = DefectDetector(leak.graph, 3).scan(DefectKind::MemoryLeak);
+  for (const auto &finding : leaks.findings)
+    EXPECT_EQ(std::count(finding.objects.begin(), finding.objects.end(), ObjectID(20)), 0);
 }
 
 TEST(UseTraceSSANative, AllocationSiteGranularityMergesAbstractCopies) {
