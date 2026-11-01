@@ -1,0 +1,4 @@
+{
+  "smoke": {"timeout": 300, "mem_limit_gb": 6, "max_workers": 1, "repeat": 1},
+  "paper": {"timeout": 3600, "mem_limit_gb": 64, "max_workers": 1, "repeat": 3}
+}

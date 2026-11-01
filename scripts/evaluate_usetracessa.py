@@ -11,6 +11,14 @@ and peak RSS are easier to compare; --max-workers enables throughput-oriented
 parallel runs. Tools run with the Lotus root as working directory so that
 config/*.spec are found.
 
+Tables should use the tools' own `total_ms` / `analysis_ms`; `wall_time_s` is
+kept for timeouts. `--repeat N` runs every configuration N times (summarize
+medians with summarize_usetracessa.py). `--preset` loads limits from
+scripts/eval_presets.json, `--manifest` reads benchmarks from a manifest, and
+`--details-dir` stores per-run (sink site, object, status) JSON for the
+differential oracle (oracle_usetracessa.py). The results file holds run
+metadata and the records.
+
 Examples:
     python3 scripts/evaluate_usetracessa.py
     python3 scripts/evaluate_usetracessa.py --tools usetracessa,ufg \
@@ -22,9 +30,11 @@ Examples:
 """
 import argparse
 import concurrent.futures
+import datetime
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import signal
 import subprocess
@@ -33,6 +43,7 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+PRESETS = Path(__file__).resolve().parent / "eval_presets.json"
 DEFAULT_BINS = {
     "usetracessa": ROOT / "build/bin/lotus-ir-usetracessa",
     "ufg": ROOT / "build/bin/lotus-ir-ufg",
@@ -49,6 +60,8 @@ SVFG_MSSA_MODES = ("auto", "on", "off")
 BITCODE_MAGIC = (b"BC\xc0\xde", b"\xde\xc0\x17\x0b")
 KEY_VALUE = re.compile(r"([a-z][a-z0-9_]*)=([^\s]+)")
 IR_BUDGETS = ("max-product-states", "max-summary-pairs")
+# Power-of-two buckets: entry b counts values v with 2^b <= v < 2^(b+1).
+HISTOGRAMS = ("push_sizes", "guard_k_hist")
 
 
 def budget_value(text):
@@ -66,6 +79,16 @@ def context_limit_value(text):
 
 def key_values(line):
     return dict(KEY_VALUE.findall(line))
+
+
+def number(text):
+    try:
+        return int(text)
+    except ValueError:
+        try:
+            return float(text)
+        except ValueError:
+            return text
 
 
 def choice_list(choices):
@@ -149,6 +172,9 @@ def run_cmd_with_limits(cmd, timeout_s, mem_limit_gb):
         peak_rss = 0.0
         killed_reason = None
         usage = None
+        # Poll quickly at first so short runs are not rounded up to the
+        # sampling period, then back off to 0.1 s.
+        interval = 0.001
         while True:
             usage = reap_with_usage(proc, os.WNOHANG)
             if usage is not None:
@@ -162,7 +188,8 @@ def run_cmd_with_limits(cmd, timeout_s, mem_limit_gb):
             if killed_reason:
                 kill_proc_group(proc)
                 break
-            time.sleep(0.1)
+            time.sleep(interval)
+            interval = min(interval * 2, 0.1)
         if usage is None:
             usage = reap_with_usage(proc, 0)
         peak_rss = max(peak_rss, peak_rss_mb(usage))
@@ -188,16 +215,14 @@ def parse_ir_output(stdout, stderr):
     parsed = {"check_result": None, "findings": None,
               "finding_sites": None, "exhaustive": None}
     for line in stdout.splitlines():
-        if line.startswith(("svfg_nodes=", "batch_products=",
-                            "lane_product_states=")):
+        if line.startswith(("svfg_nodes=", "product_states=")):
             for key, value in key_values(line).items():
                 if key == "context_mode":
                     parsed[key] = value
-                    continue
-                try:
-                    parsed[key] = int(value)
-                except ValueError:
-                    pass
+                elif key in HISTOGRAMS:
+                    parsed[key] = [int(part) for part in value.split(",") if part]
+                else:
+                    parsed[key] = number(value)
         elif line.startswith("check="):
             fields = key_values(line)
             parsed["check_result"] = fields.get("result")
@@ -255,7 +280,8 @@ def parse_saber_output(stdout, stderr):
 
 
 def build_cmd(task, binaries, context_limit, budgets=None,
-              context_mode="sensitive", saber_budgets=None):
+              context_mode="sensitive", saber_budgets=None, details=None,
+              witnesses=False):
     tool, bug_type, bc_path = task["tool"], task["bug_type"], task["bc_path"]
     if tool in ("usetracessa", "ufg"):
         cmd = [str(binaries[tool]), str(bc_path), "--quiet", "--timing",
@@ -269,6 +295,10 @@ def build_cmd(task, binaries, context_limit, budgets=None,
         for flag in IR_BUDGETS:
             limit = (budgets or {}).get(flag, 0)
             cmd.append(f"--{flag}={limit if limit else 'unlimited'}")
+        if details:
+            cmd.append(f"--results-json={details}")
+            if witnesses:
+                cmd.append("--results-witnesses")
         return cmd
     if context_mode != "sensitive" or context_limit is None:
         raise ValueError("Saber requires context-sensitive search with a numeric context limit")
@@ -277,13 +307,16 @@ def build_cmd(task, binaries, context_limit, budgets=None,
             f"--saber.context-limit={context_limit}",
             *(f"--saber.{key}={value}" for key, value in (saber_budgets or {}).items()),
             *(() if task["smt_mode"] == "smt" else ("--saber.no-smt",)),
+            *((f"--report-json={details}",) if details else ()),
             str(bc_path)]
 
 
 def make_tasks(benchmarks, tools, checks, object_modes=("batch",),
                granularities=("site",), svfg_mssa="auto", saber_smt=False,
-               temporal_graphs=("sparse",)):
-    """Expand tools into configurations; options that do not apply stay None."""
+               temporal_graphs=("sparse",), repeat=1):
+    """Expand tools into configurations; options that do not apply stay None.
+    Repeats are the outer loop so that runs of one configuration are spread
+    over the whole experiment."""
     tasks = []
     for bc_path in benchmarks:
         for bug_type in checks:
@@ -309,14 +342,23 @@ def make_tasks(benchmarks, tools, checks, object_modes=("batch",),
                         "smt_mode": smt_mode, "object_mode": None,
                         "temporal_graph": None, "object_granularity": None,
                         "svfg_mssa": None})
-    return tasks
+    return [dict(task, repeat=run) for run in range(repeat) for task in tasks]
+
+
+def details_name(index, task):
+    parts = [f"{index:05d}", task["bc_path"].name, task["tool"], task["bug_type"]]
+    parts += [task[key] for key in ("smt_mode", "object_mode", "temporal_graph",
+                                    "object_granularity") if task.get(key)]
+    return "-".join(parts) + f"-r{task['repeat']}.json"
 
 
 def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
-                 context_limit, budgets=None, context_mode="sensitive", saber_budgets=None):
+                 context_limit, budgets=None, context_mode="sensitive", saber_budgets=None,
+                 details_dir=None, witnesses=False, benchmark_info=None):
     tool, bug_type, bc_path = task["tool"], task["bug_type"], task["bc_path"]
+    details = details_dir / details_name(index, task) if details_dir else None
     cmd = build_cmd(task, binaries, context_limit, budgets, context_mode,
-                    saber_budgets)
+                    saber_budgets, details, witnesses)
     execution = run_cmd_with_limits(cmd, timeout_s, mem_limit_gb)
     parsed = (parse_saber_output(execution["stdout"], execution["stderr"])
               if tool == "saber" else
@@ -332,7 +374,8 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
         if any(parsed.get(field) is None for field in required):
             status = "PARSE_ERROR"
     record = {
-        "task_id": index, "tool": tool, "bug_type": bug_type,
+        "task_id": index, "repeat": task["repeat"], "tool": tool, "bug_type": bug_type,
+        **(benchmark_info or {}),
         "smt_mode": task["smt_mode"],
         "object_mode": task["object_mode"],
         "temporal_graph": task["temporal_graph"],
@@ -357,6 +400,10 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
         "search_limits": ({key: (budgets or {}).get(key, 0) for key in IR_BUDGETS}
                           if tool != "saber" else saber_budgets or {}),
         "command": cmd, "status": status,
+        "details": str(details) if details and details.is_file() else None,
+        # Unknown without a complete model is not a negative result.
+        "unknown_incomplete_model": (parsed.get("check_result") == "Unknown" and
+                                     parsed.get("model_complete") is False),
         "wall_time_s": execution["wall_time_s"],
         "max_rss_mb": execution["max_rss_mb"],
         **parsed,
@@ -367,22 +414,99 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
     return record
 
 
-def save_results(path, records):
+def command_output(cmd):
+    try:
+        return subprocess.check_output(cmd, cwd=ROOT, stderr=subprocess.DEVNULL,
+                                       text=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def git_commit():
+    commit = command_output(["git", "rev-parse", "HEAD"])
+    if commit:
+        return commit
+    # Fallback when git cannot run (e.g. an x86_64 Python on arm64 macOS).
+    git = ROOT / ".git"
+    try:
+        head = (git / "HEAD").read_text().strip()
+        if not head.startswith("ref: "):
+            return head
+        ref = head[5:]
+        if (git / ref).is_file():
+            return (git / ref).read_text().strip()
+        for line in (git / "packed-refs").read_text().splitlines():
+            if line.endswith(" " + ref):
+                return line.split()[0]
+    except OSError:
+        pass
+    return None
+
+
+def cpu_model():
+    if sys.platform == "darwin":
+        return command_output(["sysctl", "-n", "machdep.cpu.brand_string"])
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return platform.processor() or None
+
+
+def run_metadata(args, binaries, limits):
+    """Environment needed to report and reproduce the numbers."""
+    llvm = None
+    for binary in binaries.values():
+        text = command_output([str(binary), "--version"]) or ""
+        match = re.search(r"LLVM version (\S+)", text)
+        if match:
+            llvm = match.group(1)
+            break
+    status = command_output(["git", "status", "--porcelain", "--untracked-files=no"])
+    return {
+        "started": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "lotus_commit": git_commit(),
+        "lotus_dirty": bool(status) if status is not None else None,
+        "llvm_version": llvm,
+        "cpu": cpu_model(),
+        "cpu_count": os.cpu_count(),
+        "os": platform.platform(),
+        "python": platform.python_version(),
+        "preset": args.preset,
+        "manifest": str(args.manifest) if args.manifest else None,
+        "repeat": args.repeat,
+        "binaries": {tool: str(path) for tool, path in binaries.items()},
+        "limits": limits,
+        "argv": sys.argv[1:],
+    }
+
+
+def save_results(path, records, metadata=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="w", dir=path.parent, prefix=f".{path.name}.",
         suffix=".tmp", delete=False,
     ) as output:
-        json.dump([item for item in records if item is not None], output, indent=2)
+        json.dump({"metadata": metadata or {},
+                   "records": [item for item in records if item is not None]},
+                  output, indent=2)
         output.write("\n")
         temporary = Path(output.name)
     os.replace(temporary, path)
 
 
 def main():
+    presets = json.loads(PRESETS.read_text()) if PRESETS.is_file() else {}
     parser = argparse.ArgumentParser(
         description="Evaluate UseTraceSSA, object-expanded UFG, and Saber",
         allow_abbrev=False)
+    parser.add_argument("--preset", choices=sorted(presets),
+                        help=f"Limits and repeats from {PRESETS.name}; explicit "
+                             "options override it")
+    parser.add_argument("--repeat", type=int, default=1,
+                        help="Runs per configuration (default: 1)")
     parser.add_argument("--tools", default="usetracessa,ufg,saber",
                         help="Comma-separated tools (default: all three)")
     parser.add_argument("--max-workers", type=int, default=1,
@@ -435,17 +559,32 @@ def main():
                         help="Directory containing LLVM bitcode files")
     parser.add_argument("--inputs", type=Path, nargs="+",
                         help="Explicit LLVM bitcode files instead of --benchmarks-dir")
+    parser.add_argument("--manifest", type=Path,
+                        help="Benchmark manifest JSON (name, bitcode, suite, version, "
+                             "kloc) instead of --benchmarks-dir")
     parser.add_argument("--results", type=Path, default=Path("eval_results.json"))
+    parser.add_argument("--details-dir", type=Path,
+                        help="Write per-run (sink site, object, status) JSON here; "
+                             "Saber writes its --report-json")
+    parser.add_argument("--witnesses", action="store_true",
+                        help="Include one witness per finding site in --details-dir "
+                             "files (UseTraceSSA/UFG)")
     for tool in DEFAULT_BINS:
         parser.add_argument(f"--{tool}-bin", type=Path, default=DEFAULT_BINS[tool])
+    known, _ = parser.parse_known_args()
+    if known.preset:
+        parser.set_defaults(**presets[known.preset])
     args = parser.parse_args()
 
     tools = tuple(part.strip() for part in args.tools.split(",") if part.strip())
     if not tools or len(set(tools)) != len(tools) or any(
             tool not in DEFAULT_BINS for tool in tools):
         parser.error("--tools must list distinct names from usetracessa,ufg,saber")
-    if args.max_workers < 1 or args.timeout <= 0 or args.mem_limit_gb <= 0:
-        parser.error("workers, timeout, and memory limit must be positive")
+    if (args.max_workers < 1 or args.timeout <= 0 or args.mem_limit_gb <= 0 or
+            args.repeat < 1):
+        parser.error("workers, repeats, timeout, and memory limit must be positive")
+    if args.inputs and args.manifest:
+        parser.error("--inputs and --manifest are mutually exclusive")
     context_mode = args.context
     context_limit = None if args.unbounded_context else args.context_limit
     if "saber" in tools:
@@ -466,7 +605,21 @@ def main():
         if not binary.is_file():
             parser.error(f"{tool} binary not found: {binary}")
 
-    if args.inputs:
+    benchmark_info = {}
+    if args.manifest:
+        manifest = json.loads(args.manifest.read_text())
+        benchmarks = []
+        for entry in manifest["benchmarks"]:
+            path = Path(entry["bitcode"])
+            path = (path if path.is_absolute() else ROOT / path).resolve()
+            benchmarks.append(path)
+            benchmark_info[path] = {
+                "benchmark": entry["name"],
+                "suite": entry.get("suite", manifest.get("suite")),
+                "version": entry.get("version"),
+                "kloc": entry.get("kloc"),
+            }
+    elif args.inputs:
         benchmarks = [path.resolve() for path in args.inputs]
     else:
         directory = args.benchmarks_dir.resolve()
@@ -480,10 +633,19 @@ def main():
 
     tasks = make_tasks(benchmarks, tools, args.checks, args.object_modes,
                        args.object_granularities, args.svfg_mssa, args.saber_smt,
-                       args.temporal_graphs)
+                       args.temporal_graphs, args.repeat)
     records = [None] * len(tasks)
+    if args.details_dir:
+        args.details_dir = args.details_dir.resolve()
+        args.details_dir.mkdir(parents=True, exist_ok=True)
+    metadata = run_metadata(args, binaries, {
+        "timeout_s": args.timeout, "mem_limit_gb": args.mem_limit_gb,
+        "max_workers": args.max_workers, "context": context_mode,
+        "context_limit": context_limit, "ir_budgets": budgets,
+        "saber_budgets": saber_budgets})
     print(f"Benchmarks: {len(benchmarks)}  Tools: {','.join(tools)}")
-    print(f"Tasks: {len(tasks)}  Workers: {args.max_workers}")
+    print(f"Tasks: {len(tasks)}  Workers: {args.max_workers}  Repeat: {args.repeat}"
+          f"{'  Preset: ' + args.preset if args.preset else ''}")
     print(f"Checks: {','.join(args.checks)}  Object modes: {','.join(args.object_modes)}  "
           f"Temporal graphs: {','.join(args.temporal_graphs)}  "
           f"Granularities: {','.join(args.object_granularities)}  "
@@ -503,21 +665,23 @@ def main():
         futures = {
             executor.submit(execute_task, index, task, args.timeout,
                             args.mem_limit_gb, binaries,
-                            context_limit, budgets, context_mode, saber_budgets): index
+                            context_limit, budgets, context_mode, saber_budgets,
+                            args.details_dir, args.witnesses,
+                            benchmark_info.get(task["bc_path"])): index
             for index, task in enumerate(tasks)
         }
         for future in concurrent.futures.as_completed(futures):
             index = futures[future]
             record = future.result()
             records[index] = record
-            save_results(args.results, records)
+            save_results(args.results, records, metadata)
             print(
                 f"[{record['status']:12s}] {record['tool']:12s} "
-                f"{record['bug_type']:16s} {record['bc']:16s} "
+                f"{record['bug_type']:16s} {record['bc']:16s} r{record['repeat']} "
                 f"mode={record['smt_mode']}/{record['object_mode'] or '-'}/"
                 f"{record['temporal_graph'] or '-'}/"
                 f"{record['object_granularity'] or '-':8s} "
-                f"time={record['wall_time_s']:8.3f}s "
+                f"total={record.get('total_ms')}ms "
                 f"rss={record['max_rss_mb']:8.1f}MiB "
                 f"result={record.get('check_result') or '-':8s} "
                 f"findings={record.get('findings')} "
