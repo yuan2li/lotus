@@ -48,6 +48,12 @@ llvm::cl::opt<std::string> SVFGMemorySSA(
     "svfg-mssa",
     llvm::cl::desc("SVFG Memory SSA: auto (off for --check), on, or off"),
     llvm::cl::init("auto"));
+llvm::cl::opt<bool> HeapObjectsOnly(
+    "heap-objects-only",
+    llvm::cl::desc("Heap checks track heap objects only, dropping stack, global "
+                   "and constant points-to objects (default: true; false keeps "
+                   "every object, the earlier behavior)"),
+    llvm::cl::init(true));
 llvm::cl::opt<std::string> PointerAnalysis(
     "pta",
     llvm::cl::desc("Points-to sets of event pointers: andersen (the SVFG's) or "
@@ -198,6 +204,7 @@ int main(int argc, char **argv) {
     // module, and finding sites stay comparable across the two tools.
     historyOptions.instructionText = Check.empty() || !Quiet || FullLabels;
     historyOptions.allocationSiteObjects = ObjectGranularity == "site";
+    historyOptions.heapObjectsOnly = HeapObjectsOnly;
     if (flowSensitive) historyOptions.pointsTo = std::cref(*flowSensitive);
     auto result =
         buildUseTraceSSAFromLotusSVFG(*svfg, *module, mode, historyOptions);
@@ -279,7 +286,8 @@ int main(int argc, char **argv) {
                 << " ufg_objects=" << ufgStats.objects
                 << " ufg_nodes=" << ufgStats.nodes
                 << " ufg_edges=" << ufgStats.edges
-                << " issues=" << result.graph.issues().size() << '\n';
+                << " issues=" << result.graph.issues().size()
+                << " excluded_nonheap_objects=" << result.excludedNonHeapObjects << '\n';
       if (!Quiet)
         for (const auto &issue : result.graph.issues())
           std::cout << "issue: " << issue << '\n';
@@ -349,7 +357,9 @@ int main(int argc, char **argv) {
       StableObjectKeys objectKeys(*svfg, *module);
       cli::writeResultsJSON(
           out, "ufg", Check,
-          {{"object_granularity", ObjectGranularity}, {"pta", PointerAnalysis}},
+          {{"object_granularity", ObjectGranularity},
+           {"pta", PointerAnalysis},
+           {"heap_objects_only", HeapObjectsOnly ? "true" : "false"}},
           *checkReport,
           [&](std::size_t index) {
             const auto &nodes = checkReport->findings[index].result.nodes;

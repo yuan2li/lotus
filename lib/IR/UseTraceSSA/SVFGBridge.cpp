@@ -227,6 +227,8 @@ struct ResourcePlan {
   /// analysis, in module order.
   std::map<const llvm::CallBase *, std::vector<const llvm::Function *>> indirect = {};
   std::vector<std::string> issues = {};
+  /// Non-heap objects dropped from heap event guards.
+  std::set<ObjectID> excludedNonHeap = {};
   bool dense = false;
   bool keeps(const llvm::Instruction &instruction) const {
     if (dense) return !llvm::isa<llvm::DbgInfoIntrinsic>(instruction);
@@ -456,8 +458,26 @@ ObjectSet canonicalObjects(const analysis::SVFG &svfg, const ObjectSet &objects,
   return ObjectSet::known(std::move(merged));
 }
 
+/// Whether an SVFG object is known to be a stack, global, function or constant
+/// object, from the allocation value of its base. Objects without a value stay.
+bool nonHeapObject(const analysis::SVFG &svfg, ObjectID object) {
+  auto root = static_cast<std::uint32_t>(object);
+  for (unsigned depth = 0; depth < 64; ++depth) {
+    const auto *info = svfg.getObjectInfo(root);
+    if (!info || info->baseObjId == 0 || info->baseObjId == root) break;
+    root = info->baseObjId;
+  }
+  const llvm::Value *site = svfg.getObjectValue(root);
+  if (!site) return false;
+  site = site->stripPointerCasts();
+  return llvm::isa<llvm::AllocaInst>(site) || llvm::isa<llvm::Constant>(site);
+}
+
+/// Points-to objects of an event pointer. With `excluded`, non-heap objects
+/// are dropped and recorded there.
 ObjectSet resourceObjects(const analysis::SVFG &svfg, const llvm::Value *pointer,
-                          bool allocationSites, const NativeHistoryOptions &options) {
+                          bool allocationSites, const NativeHistoryOptions &options,
+                          std::set<ObjectID> *excluded) {
   std::optional<analysis::SVFGNodeBS> provided;
   if (options.pointsTo) provided = options.pointsTo(pointer);
   const auto &pointsTo = provided ? *provided : svfg.getObjectIds(pointer);
@@ -465,7 +485,12 @@ ObjectSet resourceObjects(const analysis::SVFG &svfg, const llvm::Value *pointer
   std::vector<ObjectID> objects;
   for (auto object : pointsTo) {
     if (svfg.isUnknownObject(object)) return ObjectSet::unknown();
-    objects.push_back(allocationSites ? allocationSiteObject(svfg, object) : object);
+    ObjectID named = allocationSites ? allocationSiteObject(svfg, object) : object;
+    if (excluded && nonHeapObject(svfg, object)) {
+      excluded->insert(named);
+      continue;
+    }
+    objects.push_back(named);
   }
   return ObjectSet::known(std::move(objects));
 }
@@ -473,6 +498,10 @@ ObjectSet resourceObjects(const analysis::SVFG &svfg, const llvm::Value *pointer
 ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &module,
                            NativeHistoryMode mode, const NativeHistoryOptions &options) {
   const bool allocationSites = options.allocationSiteObjects;
+  const bool heapOnly =
+      options.heapObjectsOnly &&
+      (mode == NativeHistoryMode::DoubleFree || mode == NativeHistoryMode::UseAfterFree ||
+       mode == NativeHistoryMode::MemoryLeak);
   ResourcePlan plan{resourceProperty(mode)};
   plan.hasRequired = mode == NativeHistoryMode::Full;
   std::set<const llvm::Function *> called;
@@ -538,7 +567,8 @@ ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &modul
     if (cached == cache.end()) {
       auto raw = objectGuards.find(pointer);
       auto objects = raw == objectGuards.end()
-                         ? resourceObjects(svfg, pointer, allocationSites, options)
+                         ? resourceObjects(svfg, pointer, allocationSites, options,
+                                           heapOnly ? &plan.excludedNonHeap : nullptr)
                          : raw->second;
       if (objects.isUnknown()) {
         const auto *site =
@@ -716,6 +746,7 @@ SVFGHistoryResult buildUseTraceSSAFromLotusSVFG(const analysis::SVFG &svfg,
   if (!plan.hasRequired) {
     SVFGHistoryResult result;
     result.graph.addIssue("required native source events are absent for the selected property");
+    result.excludedNonHeapObjects = plan.excludedNonHeap.size();
     return result;
   }
   FunctionID nextFunction = 1;
@@ -749,6 +780,7 @@ SVFGHistoryResult buildUseTraceSSAFromLotusSVFG(const analysis::SVFG &svfg,
       result.graph.addIssue(issue);
     if (!plan.universe.isUnknown())
       result.graph.setResourceUniverse(plan.universe.objects());
+    result.excludedNonHeapObjects = plan.excludedNonHeap.size();
     return result;
   }
   FunctionLayout globals;

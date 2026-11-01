@@ -35,6 +35,11 @@ struct NativeHistoryOptions {
   /// object IDs. nullopt falls back to the SVFG for that pointer. Call edges
   /// still come from the SVFG.
   std::function<std::optional<analysis::SVFGNodeBS>(const llvm::Value *)> pointsTo = {};
+  /// Heap properties (double-free, use-after-free, memory leak) track heap
+  /// objects only: objects allocated by an alloca, a global, a function or a
+  /// constant (e.g. a string literal) are dropped from event guards. Freeing
+  /// such an object is a different defect. False keeps every points-to object.
+  bool heapObjectsOnly = true;
 };
 
 /// Construct ordered histories from this revision's SVFG and the LLVM CFG.

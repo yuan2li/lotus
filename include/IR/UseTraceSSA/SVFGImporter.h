@@ -107,6 +107,9 @@ struct SVFGHistoryResult {
   SVFGImportResult native;
   std::map<NativeID, ValueID> channels;
   std::map<FunctionID, std::map<SiteID, SiteID>> sites;
+  /// Stack, global and constant objects dropped from heap event guards
+  /// (NativeHistoryOptions::heapObjectsOnly), counted at the chosen granularity.
+  std::size_t excludedNonHeapObjects = 0;
 };
 
 // ---------------------------------------------------------------------------

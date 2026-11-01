@@ -50,6 +50,12 @@ llvm::cl::opt<std::string> SVFGMemorySSA(
     "svfg-mssa",
     llvm::cl::desc("SVFG Memory SSA: auto (off for --check), on, or off"),
     llvm::cl::init("auto"));
+llvm::cl::opt<bool> HeapObjectsOnly(
+    "heap-objects-only",
+    llvm::cl::desc("Heap checks track heap objects only, dropping stack, global "
+                   "and constant points-to objects (default: true; false keeps "
+                   "every object, the earlier behavior)"),
+    llvm::cl::init(true));
 llvm::cl::opt<std::string> PointerAnalysis(
     "pta",
     llvm::cl::desc("Points-to sets of event pointers: andersen (the SVFG's) or "
@@ -219,6 +225,7 @@ int main(int argc, char **argv) {
     NativeHistoryOptions historyOptions;
     historyOptions.instructionText = Check.empty() || !Quiet || FullLabels;
     historyOptions.allocationSiteObjects = ObjectGranularity == "site";
+    historyOptions.heapObjectsOnly = HeapObjectsOnly;
     if (flowSensitive) historyOptions.pointsTo = std::cref(*flowSensitive);
     historyOptions.denseControlFlow = TemporalGraph == "icfg";
     if (Timing)
@@ -289,7 +296,8 @@ int main(int argc, char **argv) {
                 << " guarded_effects=" << stats.guardedEffects
                 << " known_object_cardinality=" << stats.knownObjectCardinality
                 << " unknown_object_sets=" << stats.unknownObjectSets
-                << " issues=" << result.graph.issues().size();
+                << " issues=" << result.graph.issues().size()
+                << " excluded_nonheap_objects=" << result.excludedNonHeapObjects;
       // Alias multiplicity k of known guards at relevant sites (RQ2).
       auto guards = stats.effectGuardSizes;
       std::sort(guards.begin(), guards.end());
@@ -415,6 +423,7 @@ int main(int argc, char **argv) {
           {{"object_mode", ObjectMode},
            {"temporal_graph", TemporalGraph},
            {"pta", PointerAnalysis},
+           {"heap_objects_only", HeapObjectsOnly ? "true" : "false"},
            {"object_granularity", ObjectGranularity}},
           *checkReport,
           [&](std::size_t index) {

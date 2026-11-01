@@ -392,6 +392,58 @@ TEST(UseTraceSSANative, PointsToSourceReplacesSVFGSets) {
   expectFixedMatchesBatch(split.graph, DefectKind::DoubleFree);
 }
 
+TEST(UseTraceSSANative, HeapPropertiesTrackHeapObjectsOnly) {
+  llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
+  auto module = llvm::parseAssemblyString(R"IR(
+    @text = private constant [3 x i8] c"ab\00"
+    declare i8* @malloc(i64)
+    declare void @free(i8*)
+    define void @flow(i1 %c) {
+      %slot = alloca i8
+      %heap = call i8* @malloc(i64 8)
+      %p = select i1 %c, i8* %slot, i8* %heap
+      %q = select i1 %c, i8* getelementptr ([3 x i8], [3 x i8]* @text, i64 0, i64 0), i8* %heap
+      call void @free(i8* %p)
+      call void @free(i8* %q)
+      ret void
+    }
+  )IR", diagnostic, context);
+  ASSERT_TRUE(module);
+  lotus::analysis::SVFG svfg;
+  svfg.setObjectValue(10, module->getNamedGlobal("text"));
+  for (const auto &instruction : llvm::instructions(*module->getFunction("flow"))) {
+    if (instruction.getName() == "slot") svfg.setObjectValue(30, &instruction);
+    if (instruction.getName() == "heap") {
+      svfg.setObjectValue(20, &instruction);
+      svfg.addObjectForValue(&instruction, 20);
+    }
+    if (instruction.getName() == "p") {
+      svfg.addObjectForValue(&instruction, 30);
+      svfg.addObjectForValue(&instruction, 20);
+    }
+    if (instruction.getName() == "q") {
+      svfg.addObjectForValue(&instruction, 10);
+      svfg.addObjectForValue(&instruction, 20);
+    }
+  }
+  auto heap = buildUseTraceSSAFromLotusSVFG(svfg, *module, NativeHistoryMode::DoubleFree);
+  EXPECT_EQ(heap.graph.resourceCandidates(), std::vector<ObjectID>({20}));
+  EXPECT_EQ(heap.excludedNonHeapObjects, 2u);
+  auto scan = DefectDetector(heap.graph, 3).scan(DefectKind::DoubleFree);
+  ASSERT_EQ(scan.findings.size(), 1u);
+  EXPECT_EQ(scan.findings[0].objects, std::vector<ObjectID>({20}));
+  expectFixedMatchesBatch(heap.graph, DefectKind::DoubleFree);
+
+  // The switch restores every points-to object, including the stack slot and
+  // the string literal.
+  NativeHistoryOptions everyObject;
+  everyObject.heapObjectsOnly = false;
+  auto all = buildUseTraceSSAFromLotusSVFG(svfg, *module, NativeHistoryMode::DoubleFree,
+                                           everyObject);
+  EXPECT_EQ(all.graph.resourceCandidates(), std::vector<ObjectID>({10, 20, 30}));
+  EXPECT_EQ(all.excludedNonHeapObjects, 0u);
+}
+
 TEST(UseTraceSSANative, CxxNewAndDeleteAreHeapEvents) {
   llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
   auto module = llvm::parseAssemblyString(R"IR(
