@@ -1,6 +1,7 @@
 #include "IR/ICFG/ICFGBuilder.h"
 #include "IR/SVFG/SVFGBuilder.h"
 #include "IR/UseTraceSSA/DefectDetector.h"
+#include "IR/UseTraceSSA/FlowSensitivePointsTo.h"
 #include "IR/UseTraceSSA/Query.h"
 #include "IR/UseTraceSSA/ResultExport.h"
 #include "IR/UseTraceSSA/SVFGBridge.h"
@@ -49,6 +50,11 @@ llvm::cl::opt<std::string> SVFGMemorySSA(
     "svfg-mssa",
     llvm::cl::desc("SVFG Memory SSA: auto (off for --check), on, or off"),
     llvm::cl::init("auto"));
+llvm::cl::opt<std::string> PointerAnalysis(
+    "pta",
+    llvm::cl::desc("Points-to sets of event pointers: andersen (the SVFG's) or "
+                   "fspta (flow-sensitive over the same SVFG; builds Memory SSA)"),
+    llvm::cl::init("andersen"));
 llvm::cl::opt<bool> SVFGPointerOnly(
     "svfg-pointer-only",
     llvm::cl::desc("Keep only pointer-typed SVFG value flows (default: true)"),
@@ -128,6 +134,10 @@ int main(int argc, char **argv) {
     llvm::errs() << "lotus-ir-usetracessa: supply both --source-node and --sink-node\n";
     return 1;
   }
+  if (PointerAnalysis != "andersen" && PointerAnalysis != "fspta") {
+    llvm::errs() << "lotus-ir-usetracessa: --pta must be andersen or fspta\n";
+    return 1;
+  }
   if (SVFGMemorySSA != "auto" && SVFGMemorySSA != "on" && SVFGMemorySSA != "off") {
     llvm::errs() << "lotus-ir-usetracessa: --svfg-mssa must be auto, on, or off\n";
     return 1;
@@ -188,7 +198,7 @@ int main(int argc, char **argv) {
     icfgBuilder.build(module.get());
     SVFGBuilderConfig config;
     config.usePointerAnalysis = true;
-    config.buildMSSA = SVFGMemorySSA == "on" ||
+    config.buildMSSA = SVFGMemorySSA == "on" || PointerAnalysis == "fspta" ||
                        (SVFGMemorySSA == "auto" && Check.empty());
     config.pointerOnly = SVFGPointerOnly;
     config.resolveIndirectCalls = true;
@@ -197,6 +207,10 @@ int main(int argc, char **argv) {
     const auto builtSVFG = Clock::now();
     if (Timing) std::cerr << "timing_ms svfg=" << millis(parsed, builtSVFG) << '\n';
     if (!DumpSVFG.empty()) svfg->dump(DumpSVFG);
+    // Pointer-analysis ablation: flow-sensitive sets over the same SVFG.
+    std::optional<lotus::usetracessa::cli::FlowSensitivePointsTo> flowSensitive;
+    if (PointerAnalysis == "fspta") flowSensitive.emplace(*svfg, builder);
+    const auto builtPTA = Clock::now();
     NativeHistoryMode mode = Check == "double-free" ? NativeHistoryMode::DoubleFree :
                              Check == "use-after-free" ? NativeHistoryMode::UseAfterFree :
                              Check == "memory-leak" ? NativeHistoryMode::MemoryLeak :
@@ -205,6 +219,7 @@ int main(int argc, char **argv) {
     NativeHistoryOptions historyOptions;
     historyOptions.instructionText = Check.empty() || !Quiet || FullLabels;
     historyOptions.allocationSiteObjects = ObjectGranularity == "site";
+    if (flowSensitive) historyOptions.pointsTo = std::cref(*flowSensitive);
     historyOptions.denseControlFlow = TemporalGraph == "icfg";
     if (Timing)
       historyOptions.phaseTiming = [](const char *phase, double elapsed) {
@@ -214,7 +229,7 @@ int main(int argc, char **argv) {
         buildUseTraceSSAFromLotusSVFG(*svfg, *module, mode, historyOptions);
     const auto builtHistory = Clock::now();
     if (Timing)
-      std::cerr << "timing_ms usetracessa=" << millis(builtSVFG, builtHistory) << '\n';
+      std::cerr << "timing_ms usetracessa=" << millis(builtPTA, builtHistory) << '\n';
     std::optional<DefectScan> checkReport;
     std::map<std::string, std::vector<std::size_t>> findingGroups;
     std::map<std::string, std::set<ObjectID>> findingObjects;
@@ -318,6 +333,7 @@ int main(int argc, char **argv) {
         const auto &scan = *checkReport;
         std::cout << "check=" << Check << " object_mode=" << ObjectMode
                   << " temporal_graph=" << TemporalGraph
+                  << " pta=" << PointerAnalysis
                   << " result=" << statusName(scan.status)
                   << " findings=" << scan.findings.size()
                   << " finding_sites=" << findingGroups.size()
@@ -398,6 +414,7 @@ int main(int argc, char **argv) {
           out, "usetracessa", Check,
           {{"object_mode", ObjectMode},
            {"temporal_graph", TemporalGraph},
+           {"pta", PointerAnalysis},
            {"object_granularity", ObjectGranularity}},
           *checkReport,
           [&](std::size_t index) {
@@ -410,10 +427,11 @@ int main(int argc, char **argv) {
       std::cerr << std::fixed << std::setprecision(3)
                 << "timing_ms parse=" << millis(start, parsed)
                 << " svfg=" << millis(parsed, builtSVFG)
-                << " usetracessa=" << millis(builtSVFG, builtHistory)
-                << " build=" << millis(builtSVFG, builtHistory)
+                << " pta=" << millis(builtSVFG, builtPTA)
+                << " usetracessa=" << millis(builtPTA, builtHistory)
+                << " build=" << millis(builtPTA, builtHistory)
                 << " check=" << millis(builtHistory, analyzed)
-                << " analysis=" << millis(builtSVFG, analyzed)
+                << " analysis=" << millis(builtPTA, analyzed)
                 << " total=" << millis(start, analyzed) << '\n';
     }
     cli::explainIncomplete(std::cerr, completion);
