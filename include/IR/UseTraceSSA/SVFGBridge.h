@@ -23,6 +23,10 @@ struct NativeHistoryOptions {
   /// object. Resource properties track whole allocations, so this is the
   /// default; false keeps the SVFG's abstract-object granularity.
   bool allocationSiteObjects = true;
+  /// IDE-ICFG baseline for property modes: keep every non-debug instruction as
+  /// a temporal site and every basic block, instead of only event/call sites
+  /// over contracted blocks. Guards, effects and the solver are unchanged.
+  bool denseControlFlow = false;
 };
 
 /// Construct ordered histories from this revision's SVFG and the LLVM CFG.

@@ -211,6 +211,86 @@ TEST(UseTraceSSANative, PropertySelectsEventsSitesAndObjectUniverse) {
   }
 }
 
+TEST(UseTraceSSANative, DenseControlFlowMatchesSparseSkeleton) {
+  llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
+  auto module = llvm::parseAssemblyString(R"IR(
+    declare i8* @malloc(i64)
+    declare void @free(i8*)
+    define void @release(i8* %p) {
+      call void @free(i8* %p)
+      ret void
+    }
+    define void @flow(i1 %c, i8* %other) {
+    entry:
+      %heap = call i8* @malloc(i64 8)
+      %spare = call i8* @malloc(i64 8)
+      %noise = load i8, i8* %other
+      br i1 %c, label %left, label %empty
+    left:
+      call void @release(i8* %heap)
+      br label %join
+    empty:
+      br label %join
+    join:
+      %used = load i8, i8* %heap
+      %more = add i8 %used, %noise
+      br i1 %c, label %again, label %done
+    again:
+      call void @free(i8* %heap)
+      br label %done
+    done:
+      call void @free(i8* %spare)
+      ret void
+    }
+  )IR", diagnostic, context);
+  ASSERT_TRUE(module);
+  auto &function = *module->getFunction("flow");
+  lotus::analysis::SVFG svfg;
+  svfg.addObjectForValue(function.getArg(1), 99);
+  svfg.addObjectForValue(module->getFunction("release")->getArg(0), 10);
+  for (const auto &block : function) for (const auto &instruction : block) {
+    if (instruction.getName() == "heap") svfg.addObjectForValue(&instruction, 10);
+    if (instruction.getName() == "spare") svfg.addObjectForValue(&instruction, 11);
+  }
+  NativeHistoryOptions denseOptions;
+  denseOptions.denseControlFlow = true;
+  for (auto mode : {NativeHistoryMode::DoubleFree, NativeHistoryMode::UseAfterFree,
+                    NativeHistoryMode::MemoryLeak}) {
+    auto sparse = buildUseTraceSSAFromLotusSVFG(svfg, *module, mode);
+    auto dense = buildUseTraceSSAFromLotusSVFG(svfg, *module, mode, denseOptions);
+    ASSERT_TRUE(sparse.graph.verify());
+    ASSERT_TRUE(dense.graph.verify());
+    EXPECT_GT(dense.graph.statistics().historyNodes, sparse.graph.statistics().historyNodes);
+    EXPECT_EQ(dense.graph.resourceCandidates(), sparse.graph.resourceCandidates());
+    bool noise = false, emptyBlock = false;
+    for (const auto &node : dense.graph.nodes()) {
+      noise |= node.label.find("%noise") != std::string::npos;
+      emptyBlock |= node.label.find("br label %join") != std::string::npos;
+    }
+    EXPECT_TRUE(noise);
+    EXPECT_TRUE(emptyBlock);
+    auto kind = mode == NativeHistoryMode::DoubleFree ? DefectKind::DoubleFree :
+                mode == NativeHistoryMode::UseAfterFree ? DefectKind::UseAfterFree :
+                                                          DefectKind::MemoryLeak;
+    DefectScanOptions options{true, true, false, true};
+    auto expected = DefectDetector(sparse.graph, 3).scan(kind, options);
+    auto actual = DefectDetector(dense.graph, 3).scan(kind, options);
+    EXPECT_EQ(actual.status, expected.status);
+    EXPECT_EQ(actual.statistics.foundObjects, expected.statistics.foundObjects);
+    EXPECT_EQ(actual.statistics.notFoundObjects, expected.statistics.notFoundObjects);
+    ASSERT_EQ(actual.findings.size(), expected.findings.size());
+    for (std::size_t i = 0; i < actual.findings.size(); ++i) {
+      EXPECT_EQ(actual.findings[i].objects, expected.findings[i].objects);
+      EXPECT_EQ(dense.graph.node(actual.findings[i].sink).label.substr(
+                    dense.graph.node(actual.findings[i].sink).label.find(' ')),
+                sparse.graph.node(expected.findings[i].sink).label.substr(
+                    sparse.graph.node(expected.findings[i].sink).label.find(' ')));
+    }
+    if (mode != NativeHistoryMode::MemoryLeak) EXPECT_FALSE(actual.findings.empty());
+    expectFixedMatchesBatch(dense.graph, kind);
+  }
+}
+
 TEST(UseTraceSSANative, AllocationSiteGranularityMergesAbstractCopies) {
   llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
   auto module = llvm::parseAssemblyString(R"IR(
