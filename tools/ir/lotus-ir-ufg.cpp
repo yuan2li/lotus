@@ -2,6 +2,7 @@
 #include "IR/SVFG/SVFGBuilder.h"
 #include "IR/UFG/DefectDetector.h"
 #include "IR/UseTraceSSA/ResultExport.h"
+#include "IR/UseTraceSSA/FlowSensitivePointsTo.h"
 #include "IR/UseTraceSSA/SVFGBridge.h"
 #include "IR/UseTraceSSA/TraceQueryOptions.h"
 
@@ -47,6 +48,11 @@ llvm::cl::opt<std::string> SVFGMemorySSA(
     "svfg-mssa",
     llvm::cl::desc("SVFG Memory SSA: auto (off for --check), on, or off"),
     llvm::cl::init("auto"));
+llvm::cl::opt<std::string> PointerAnalysis(
+    "pta",
+    llvm::cl::desc("Points-to sets of event pointers: andersen (the SVFG's) or "
+                   "fspta (flow-sensitive over the same SVFG; builds Memory SSA)"),
+    llvm::cl::init("andersen"));
 llvm::cl::opt<bool> SVFGPointerOnly(
     "svfg-pointer-only",
     llvm::cl::desc("Keep only pointer-typed SVFG value flows (default: true)"),
@@ -120,6 +126,10 @@ int main(int argc, char **argv) {
     llvm::errs() << "lotus-ir-ufg: supply both --source-node and --sink-node\n";
     return 1;
   }
+  if (PointerAnalysis != "andersen" && PointerAnalysis != "fspta") {
+    llvm::errs() << "lotus-ir-ufg: --pta must be andersen or fspta\n";
+    return 1;
+  }
   if (SVFGMemorySSA != "auto" && SVFGMemorySSA != "on" && SVFGMemorySSA != "off") {
     llvm::errs() << "lotus-ir-ufg: --svfg-mssa must be auto, on, or off\n";
     return 1;
@@ -166,7 +176,7 @@ int main(int argc, char **argv) {
     icfgBuilder.build(module.get());
     SVFGBuilderConfig config;
     config.usePointerAnalysis = true;
-    config.buildMSSA = SVFGMemorySSA == "on" ||
+    config.buildMSSA = SVFGMemorySSA == "on" || PointerAnalysis == "fspta" ||
                        (SVFGMemorySSA == "auto" && Check.empty());
     config.pointerOnly = SVFGPointerOnly;
     config.resolveIndirectCalls = true;
@@ -174,6 +184,10 @@ int main(int argc, char **argv) {
     std::unique_ptr<SVFG> svfg(builder.build(&icfg));
     const auto builtSVFG = Clock::now();
     if (!DumpSVFG.empty()) svfg->dump(DumpSVFG);
+    // Pointer-analysis ablation: flow-sensitive sets over the same SVFG.
+    std::optional<lotus::usetracessa::cli::FlowSensitivePointsTo> flowSensitive;
+    if (PointerAnalysis == "fspta") flowSensitive.emplace(*svfg, builder);
+    const auto builtPTA = Clock::now();
     NativeHistoryMode mode = Check == "double-free" ? NativeHistoryMode::DoubleFree :
                              Check == "use-after-free" ? NativeHistoryMode::UseAfterFree :
                              Check == "memory-leak" ? NativeHistoryMode::MemoryLeak :
@@ -184,6 +198,7 @@ int main(int argc, char **argv) {
     // module, and finding sites stay comparable across the two tools.
     historyOptions.instructionText = Check.empty() || !Quiet || FullLabels;
     historyOptions.allocationSiteObjects = ObjectGranularity == "site";
+    if (flowSensitive) historyOptions.pointsTo = std::cref(*flowSensitive);
     auto result =
         buildUseTraceSSAFromLotusSVFG(*svfg, *module, mode, historyOptions);
     const auto builtShared = Clock::now();
@@ -333,7 +348,8 @@ int main(int argc, char **argv) {
         };
       StableObjectKeys objectKeys(*svfg, *module);
       cli::writeResultsJSON(
-          out, "ufg", Check, {{"object_granularity", ObjectGranularity}},
+          out, "ufg", Check,
+          {{"object_granularity", ObjectGranularity}, {"pta", PointerAnalysis}},
           *checkReport,
           [&](std::size_t index) {
             const auto &nodes = checkReport->findings[index].result.nodes;
@@ -350,12 +366,13 @@ int main(int argc, char **argv) {
       std::cerr << std::fixed << std::setprecision(3)
                 << "timing_ms parse=" << millis(start, parsed)
                 << " svfg=" << millis(parsed, builtSVFG)
-                << " shared_temporal=" << millis(builtSVFG, builtShared)
+                << " pta=" << millis(builtSVFG, builtPTA)
+                << " shared_temporal=" << millis(builtPTA, builtShared)
                 << " ufg_expand=" << millis(builtShared, builtHistory)
-                << " ufg=" << millis(builtSVFG, builtHistory)
-                << " build=" << millis(builtSVFG, builtHistory)
+                << " ufg=" << millis(builtPTA, builtHistory)
+                << " build=" << millis(builtPTA, builtHistory)
                 << " check=" << millis(builtHistory, analyzed)
-                << " analysis=" << millis(builtSVFG, analyzed)
+                << " analysis=" << millis(builtPTA, analyzed)
                 << " total=" << millis(start, analyzed) << '\n';
     }
     cli::explainIncomplete(std::cerr, completion);
