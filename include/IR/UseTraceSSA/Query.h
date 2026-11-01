@@ -5,6 +5,7 @@
 #include "IR/UseTraceSSA/SearchBudget.h"
 #include <llvm/ADT/BitVector.h>
 #include <memory>
+#include <vector>
 
 namespace lotus {
 namespace usetracessa {
@@ -82,6 +83,8 @@ struct QueryResult {
   std::size_t productStates = 0;
   std::size_t edgesExamined = 0;
   std::size_t summaryPairs = 0;
+  /// Worklist entries processed; a fixed-object push carries one object.
+  std::size_t pushes = 0;
   std::string message;
   /// Found means a witness IN THIS ABSTRACTION, not a proof of concrete feasibility.
   bool found() const { return status == QueryStatus::Found; }
@@ -94,6 +97,7 @@ struct QueryScanResult {
   /// False when modeling or budgets prevent exhaustive sink enumeration.
   bool complete = true;
   std::size_t productStates = 0, edgesExamined = 0, summaryPairs = 0;
+  std::size_t pushes = 0;
   std::string message;
 };
 
@@ -137,6 +141,20 @@ struct ObjectBatchStatistics {
   std::size_t summaryPairs = 0, maskIntersections = 0, maskUnions = 0;
   std::size_t nonemptyDeltas = 0, candidateObjects = 0;
   std::size_t foundObjects = 0, notFoundObjects = 0, unknownObjects = 0;
+  /// Worklist entries processed and the objects they carry (|New_i|), so
+  /// sigma = pushedObjectBits / pushes. pushSizes[b] counts pushes with
+  /// 2^b <= |New_i| < 2^(b+1).
+  std::size_t pushes = 0, pushedObjectBits = 0;
+  std::vector<std::size_t> pushSizes;
+  void recordPushes(std::size_t count, std::size_t objects) {
+    if (!count) return;
+    pushes += count;
+    pushedObjectBits += count * objects;
+    unsigned bucket = 0;
+    while (bucket + 1 < 64 && (std::size_t(2) << bucket) <= objects) ++bucket;
+    if (pushSizes.size() <= bucket) pushSizes.resize(bucket + 1);
+    pushSizes[bucket] += count;
+  }
 };
 struct ObjectWitnessData;
 struct ObjectBatchResult {

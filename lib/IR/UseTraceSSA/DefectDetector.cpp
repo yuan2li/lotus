@@ -151,6 +151,8 @@ DefectScan DefectDetector::scanImpl(DefectKind kind, bool firstOnly,
       std::chrono::duration<double, std::milli>(reportStarted - searchStarted)
           .count();
   scan.statistics = batch.statistics;
+  for (auto object : batch.universe.objects())
+    scan.objectStatus.emplace(object, batch.status(object));
   scan.completion = batch.completion;
   scan.exhaustive = batch.complete;
   if (!options.retainObjects && !options.materializeWitnesses &&
@@ -277,6 +279,7 @@ void DefectDetector::scanFixedObjects(DefectKind kind, Query q, bool firstOnly,
   for (ObjectID object : universe.objects()) {
     if (stopped) {
       ++stats.unknownObjects;
+      scan.objectStatus.emplace(object, QueryStatus::Unknown);
       continue;
     }
     q.memoryObject = object;
@@ -285,8 +288,13 @@ void DefectDetector::scanFixedObjects(DefectKind kind, Query q, bool firstOnly,
     stats.productStates += answer.productStates;
     stats.edgesExamined += answer.edgesExamined;
     stats.summaryPairs += answer.summaryPairs;
-    if (!answer.foundAt.empty()) ++stats.foundObjects;
-    else if (answer.complete) ++stats.notFoundObjects;
+    stats.recordPushes(answer.pushes, 1);
+    auto status = !answer.foundAt.empty() ? QueryStatus::Found
+                  : answer.complete       ? QueryStatus::NotFound
+                                          : QueryStatus::Unknown;
+    scan.objectStatus.emplace(object, status);
+    if (status == QueryStatus::Found) ++stats.foundObjects;
+    else if (status == QueryStatus::NotFound) ++stats.notFoundObjects;
     else ++stats.unknownObjects;
     if (!answer.complete) scan.exhaustive = false;
     for (auto &found : answer.foundAt) {

@@ -2,9 +2,11 @@
 #include "IR/SVFG/SVFGBuilder.h"
 #include "IR/UseTraceSSA/DefectDetector.h"
 #include "IR/UseTraceSSA/Query.h"
+#include "IR/UseTraceSSA/ResultExport.h"
 #include "IR/UseTraceSSA/SVFGBridge.h"
 #include "IR/UseTraceSSA/TraceQueryOptions.h"
 
+#include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IRReader/IRReader.h>
@@ -13,7 +15,9 @@
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <algorithm>
 #include <chrono>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -64,6 +68,15 @@ llvm::cl::opt<std::string> TemporalGraph(
     llvm::cl::desc("--check temporal graph: sparse (event/call skeleton) or "
                    "icfg (every instruction; the IDE-ICFG baseline)"),
     llvm::cl::init("sparse"));
+llvm::cl::opt<std::string> ResultsJSON(
+    "results-json",
+    llvm::cl::desc("With --check, write per-object statuses and findings "
+                   "deduplicated by sink site to this JSON file"),
+    llvm::cl::init(""));
+llvm::cl::opt<bool> ResultsWitnesses(
+    "results-witnesses",
+    llvm::cl::desc("Include one witness path with source locations per site "
+                   "in --results-json"));
 llvm::cl::opt<bool> Quiet("quiet",
                            llvm::cl::desc("Suppress issue and witness details"));
 llvm::cl::opt<bool> FullLabels(
@@ -92,7 +105,9 @@ std::string findingSite(const FlowNode &node) {
   const std::string function = label.substr(0, functionEnd);
   if (!node.sourceLocation.empty())
     return function + ':' + node.sourceLocation;
-  return label;
+  // History versions differ between graph configurations; keep the site text.
+  const auto space = label.find(' ');
+  return space == std::string::npos ? label : function + ':' + label.substr(space + 1);
 }
 } // namespace
 
@@ -209,7 +224,8 @@ int main(int argc, char **argv) {
                         Check == "use-after-free" ? DefectKind::UseAfterFree :
                         Check == "memory-leak" ? DefectKind::MemoryLeak :
                                                  DefectKind::FileLeak;
-      DefectScanOptions scanOptions{!Quiet, !Quiet, false, !Quiet};
+      DefectScanOptions scanOptions{!Quiet, !Quiet || ResultsWitnesses, false,
+                                    !Quiet || !ResultsJSON.empty()};
       scanOptions.fixedObjects = ObjectMode == "fixed";
       checkReport = DefectDetector(result.graph, options.depth, options.limits,
                                    options.mode)
@@ -258,7 +274,41 @@ int main(int argc, char **argv) {
                 << " guarded_effects=" << stats.guardedEffects
                 << " known_object_cardinality=" << stats.knownObjectCardinality
                 << " unknown_object_sets=" << stats.unknownObjectSets
-                << " issues=" << result.graph.issues().size() << '\n';
+                << " issues=" << result.graph.issues().size();
+      // Alias multiplicity k of known guards at relevant sites (RQ2).
+      auto guards = stats.effectGuardSizes;
+      std::sort(guards.begin(), guards.end());
+      std::size_t guardTotal = 0;
+      std::vector<std::size_t> guardHistogram;
+      for (auto k : guards) {
+        guardTotal += k;
+        unsigned bucket = 0;
+        while ((std::size_t(2) << bucket) <= k) ++bucket;
+        if (guardHistogram.size() <= bucket) guardHistogram.resize(bucket + 1);
+        ++guardHistogram[bucket];
+      }
+      std::cout << " guard_k_count=" << guards.size() << " guard_k_mean="
+                << (guards.empty() ? 0.0 : double(guardTotal) / guards.size())
+                << " guard_k_median="
+                << (guards.empty() ? 0 : guards[guards.size() / 2])
+                << " guard_k_max=" << (guards.empty() ? 0 : guards.back())
+                << " guard_k_hist=";
+      for (std::size_t bucket = 0; bucket < guardHistogram.size(); ++bucket)
+        std::cout << (bucket ? "," : "") << guardHistogram[bucket];
+      std::size_t functions = 0, blocks = 0, instructions = 0;
+      for (const auto &function : *module) {
+        if (function.isDeclaration()) continue;
+        ++functions;
+        for (const auto &block : function) {
+          ++blocks;
+          for (const auto &instruction : block)
+            instructions += !llvm::isa<llvm::DbgInfoIntrinsic>(instruction);
+        }
+      }
+      std::cout << " icfg_nodes=" << icfg.getTotalNodeNum()
+                << " icfg_edges=" << icfg.getTotalEdgeNum()
+                << " ir_functions=" << functions << " ir_blocks=" << blocks
+                << " ir_instructions=" << instructions << '\n';
       if (!Quiet)
         for (const auto &issue : result.graph.issues())
           std::cout << "issue: " << issue << '\n';
@@ -273,7 +323,7 @@ int main(int argc, char **argv) {
         cli::printCompletion(std::cout, scan.completion);
         std::cout << '\n';
         const auto &qs = scan.statistics;
-        std::cout << "batch_products=" << qs.productStates
+        std::cout << "product_states=" << qs.productStates
                   << " product_edges=" << qs.productEdges
                   << " edges_examined=" << qs.edgesExamined
                   << " summary_pairs=" << qs.summaryPairs
@@ -283,7 +333,15 @@ int main(int argc, char **argv) {
                   << " candidate_objects=" << qs.candidateObjects
                   << " found_objects=" << qs.foundObjects
                   << " notfound_objects=" << qs.notFoundObjects
-                  << " unknown_objects=" << qs.unknownObjects << '\n';
+                  << " unknown_objects=" << qs.unknownObjects
+                  << " pushes=" << qs.pushes
+                  << " pushed_object_bits=" << qs.pushedObjectBits
+                  << " sigma="
+                  << (qs.pushes ? double(qs.pushedObjectBits) / qs.pushes : 0.0)
+                  << " push_sizes=";
+        for (std::size_t bucket = 0; bucket < qs.pushSizes.size(); ++bucket)
+          std::cout << (bucket ? "," : "") << qs.pushSizes[bucket];
+        std::cout << '\n';
         if (!Quiet && !scan.message.empty())
           std::cout << "message: " << scan.message << '\n';
         if (!Quiet)
@@ -316,12 +374,42 @@ int main(int argc, char **argv) {
             std::cout << "witness_node=" << node << '\n';
       }
     }
+    if (checkReport && !ResultsJSON.empty()) {
+      std::ofstream out(ResultsJSON);
+      if (!out) throw std::runtime_error("cannot write " + ResultsJSON);
+      std::function<std::vector<cli::WitnessStep>(std::size_t)> witnessOf;
+      if (ResultsWitnesses)
+        witnessOf = [&](std::size_t index) {
+          const auto &finding = checkReport->findings[index];
+          auto report = finding.result.nodes.empty()
+                            ? checkReport->materialize(index, result.graph)
+                            : finding;
+          std::vector<cli::WitnessStep> steps;
+          for (auto id : report.result.nodes) {
+            const auto &node = result.graph.node(id);
+            steps.emplace_back(node.label, node.sourceLocation);
+          }
+          return steps;
+        };
+      cli::writeResultsJSON(
+          out, "usetracessa", Check,
+          {{"object_mode", ObjectMode},
+           {"temporal_graph", TemporalGraph},
+           {"object_granularity", ObjectGranularity}},
+          *checkReport,
+          [&](std::size_t index) {
+            return findingSite(result.graph.node(checkReport->findings[index].sink));
+          },
+          witnessOf);
+    }
     if (Timing) {
       std::cerr << std::fixed << std::setprecision(3)
                 << "timing_ms parse=" << millis(start, parsed)
                 << " svfg=" << millis(parsed, builtSVFG)
                 << " usetracessa=" << millis(builtSVFG, builtHistory)
+                << " build=" << millis(builtSVFG, builtHistory)
                 << " check=" << millis(builtHistory, analyzed)
+                << " analysis=" << millis(builtSVFG, analyzed)
                 << " total=" << millis(start, analyzed) << '\n';
     }
     cli::explainIncomplete(std::cerr, completion);

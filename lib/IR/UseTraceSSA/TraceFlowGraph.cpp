@@ -229,6 +229,10 @@ FlowStatistics TraceFlowGraph::statistics() const {
   for (const auto &n : Nodes) for (const auto &effect : n.effects) {
     ++s.guardedEffects;
     count(effect.objects);
+    // Acquisitions name their own object; k measures aliasing at uses.
+    if (!effect.objects.isUnknown() &&
+        !hasEvent(effect.events, Event::Allocate | Event::Open))
+      s.effectGuardSizes.push_back(effect.objects.objects().size());
   }
   for (const auto &e : Edges) count(e.objects);
   return s;
