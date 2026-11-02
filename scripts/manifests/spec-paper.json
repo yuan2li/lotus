@@ -1,5 +1,5 @@
 {
-  "note": "Paper benchmark set (todo B2.0, decided 2026-11-01): SPEC CPU2006 and CPU2017 C programs plus 453.povray and 511.povray_r. kloc is null until cloc runs on the SPEC sources; debug_lines counts distinct file:line pairs in the bitcode debug info (executable lines, system headers excluded). version is the SPEC kit release, unknown for these prebuilt bitcode files.",
+  "note": "Paper benchmark set (todo B2.0, decided 2026-11-01): SPEC CPU2006 and CPU2017 C programs plus the C++ programs 453.povray, 511.povray_r, 541.leela_r, 520.omnetpp_r and 510.parest_r (added 2026-11-02 with the |U| narrative). kloc is null until cloc runs on the SPEC sources; debug_lines counts distinct file:line pairs in the bitcode debug info (executable lines, system headers excluded). version is the SPEC kit release, unknown for these prebuilt bitcode files.",
   "benchmarks": [
     {
       "name": "401.bzip2",
@@ -241,6 +241,42 @@
       "debug_lines": 32054,
       "source_files": 94,
       "note": "C++; timed out at 300 s in the prescreen"
+    },
+    {
+      "name": "541.leela_r",
+      "bitcode": "benchmarks/real-world/SPEC2017/leela",
+      "suite": "SPEC CPU2017",
+      "version": null,
+      "compiler": "AOCC 3.1.0 (clang 12.0.0)",
+      "build_config": "build_base_aocc-3.1.0-m64",
+      "kloc": null,
+      "debug_lines": 2856,
+      "source_files": 31,
+      "note": "C++; 21 compile units in the bitcode"
+    },
+    {
+      "name": "520.omnetpp_r",
+      "bitcode": "benchmarks/real-world/SPEC2017/omnetpp",
+      "suite": "SPEC CPU2017",
+      "version": null,
+      "compiler": "AOCC 3.1.0 (clang 12.0.0)",
+      "build_config": "build_base_aocc-3.1.0-m64",
+      "kloc": null,
+      "debug_lines": 31677,
+      "source_files": 286,
+      "note": "C++; 163 compile units in the bitcode"
+    },
+    {
+      "name": "510.parest_r",
+      "bitcode": "benchmarks/real-world/SPEC2017/parest",
+      "suite": "SPEC CPU2017",
+      "version": null,
+      "compiler": "AOCC 3.1.0 (clang 12.0.0)",
+      "build_config": "build_base_aocc-3.1.0-m64",
+      "kloc": null,
+      "debug_lines": 6369,
+      "source_files": 120,
+      "note": "C++; only 31 compile units in the bitcode, a subset of the full benchmark"
     }
   ]
 }
