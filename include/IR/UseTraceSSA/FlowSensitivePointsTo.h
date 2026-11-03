@@ -18,7 +18,8 @@ namespace cli {
 /// pointer-analysis ablation (NativeHistoryOptions::pointsTo). Objects keep
 /// the SVFG's IDs; field-insensitive representatives created while solving
 /// are reported as their base object. Indirect calls are bounded by the
-/// builder's Andersen call graph, as in lotus-alias-fspta.
+/// builder's Andersen call graph, as in lotus-alias-fspta; a call site with
+/// no Andersen targets is left unbounded.
 class FlowSensitivePointsTo {
 public:
   FlowSensitivePointsTo(analysis::SVFG &graph, analysis::SVFGBuilder &builder) {
@@ -27,6 +28,7 @@ public:
                                                     const llvm::Function *target) {
       const std::vector<const llvm::Function *> allowed =
           builder.getIndirectCallTargets(call);
+      if (allowed.empty()) return true;
       return std::find(allowed.begin(), allowed.end(), target) != allowed.end();
     };
     config.connectIndirectCall = [&graph, &builder, allowed = config.isIndirectCallTargetAllowed](
