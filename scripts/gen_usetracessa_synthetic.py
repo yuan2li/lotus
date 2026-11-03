@@ -23,7 +23,8 @@ reach the exit).
 Objects are grouped k per global, and site i uses group i mod (|U| / k), so a
 group no site touches never reaches a free or dereference. --sites-per-group
 sets --sites to that multiple of the group count, which keeps every object
-relevant as |U| grows.
+relevant as |U| grows. --free-ratio applies to each group's uses in order, so
+a group's first use frees it and later dereferences are uses after free.
 
 Examples:
     python3 scripts/gen_usetracessa_synthetic.py --aliases 100 -o k100.ll
@@ -52,7 +53,10 @@ def generate(sites=100, aliases=10, objects=None, noise=5, branch_every=10,
     else:
         noise_of = lambda: noise
         free_every = max(1, round(1 / free_ratio)) if free_ratio > 0 else 0
-        event_of_index = lambda index: ("free" if free_every and index % free_every == 0
+        # Count uses per group, so each group alternates free and dereference
+        # (and has a use after free) whatever the group count's parity.
+        event_of_index = lambda index: ("free" if free_every and
+                                        (index // groups) % free_every == 0
                                         else "deref")
         branch_of = lambda index: branch_every > 0 and index % branch_every == branch_every - 1
         group_of = lambda index: index % groups
