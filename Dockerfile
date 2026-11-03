@@ -35,7 +35,7 @@ COPY . .
 
 # Create build directory and configure
 RUN mkdir -p build && cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release \
+    cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_INSTALL_PREFIX=/usr/local \
           -DLLVM_BUILD_PATH=${LLVM_BUILD_PATH} \
           -DLLVM_CONFIG_PATH=${LLVM_CONFIG} \
@@ -44,7 +44,7 @@ RUN mkdir -p build && cd build && \
           ..
 
 # Build and install
-RUN cd build && make -j$(nproc) && make install
+RUN cd build && ninja -j$(nproc) && ninja install
 
 # UseTraceSSA evaluation: the three tools the harness runs, in build/bin, where
 # scripts/evaluate_usetracessa.py looks by default.
