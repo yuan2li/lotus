@@ -1405,21 +1405,21 @@ TEST_F(VersionedFlowSensitivePTATest,
 
 TEST_F(VersionedFlowSensitivePTATest,
        RecursiveTopologyChangeRelabelsWhenStrongUpdateMayChange) {
+  // The callee is loaded from the slot the store writes, so the recursive
+  // call can only be resolved after the store has run as a strong update,
+  // whatever order the solver visits the nodes in.
   auto module = parseModule(R"(
-    @x = global i8 0
-    @function.pointer = global void ()* @target
     define void @target() {
     entry:
-      %slot = alloca i8*
-      store i8* @x, i8** %slot
-      %callee = load void ()*, void ()** @function.pointer
+      %slot = alloca void ()*
+      store void ()* @target, void ()** %slot
+      %callee = load void ()*, void ()** %slot
       call void %callee()
       ret void
     }
     define i32 @main() {
     entry:
-      %callee = load void ()*, void ()** @function.pointer
-      call void %callee()
+      call void @target()
       ret i32 0
     }
   )");
@@ -1883,21 +1883,21 @@ TEST_F(VersionedFlowSensitivePTATest, FieldInsensitiveIdentityIsExposed) {
 
 TEST_F(VersionedFlowSensitivePTATest,
        IncrementalRecursionUpdateAvoidsFullRelabeling) {
+  // The callee is loaded from the slot the store writes, so the recursive
+  // call can only be resolved after the store has run as a strong update,
+  // whatever order the solver visits the nodes in.
   auto module = parseModule(R"(
-    @x = global i8 0
-    @function.pointer = global void ()* @target
     define void @target() {
     entry:
-      %slot = alloca i8*
-      store i8* @x, i8** %slot
-      %callee = load void ()*, void ()** @function.pointer
+      %slot = alloca void ()*
+      store void ()* @target, void ()** %slot
+      %callee = load void ()*, void ()** %slot
       call void %callee()
       ret void
     }
     define i32 @main() {
     entry:
-      %callee = load void ()*, void ()** @function.pointer
-      call void %callee()
+      call void @target()
       ret i32 0
     }
   )");
