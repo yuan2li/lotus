@@ -24,10 +24,15 @@
 #include "IR/SVFG/NormalizedGep.h"
 #include "IR/SVFG/SVFGBuilder.h"
 
+#include <llvm/ADT/PostOrderIterator.h>
 #include <llvm/Analysis/CaptureTracking.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Module.h>
+
+#include <algorithm>
+#include <unordered_map>
+#include <vector>
 
 using namespace lotus::analysis;
 using namespace llvm;
@@ -53,6 +58,50 @@ static const Module *getModuleFromICFG(const ICFG *icfg) {
     }
   }
   return nullptr;
+}
+
+// The ICFG keeps its nodes in an unordered_map, whose iteration order differs
+// between standard libraries. Node construction is order sensitive: a GEP
+// takes its field objects from base objects that already exist, so visiting a
+// GEP before the alloca it indexes loses those objects. Visit blocks by module
+// function order and reverse post-order (definitions before uses, the entry
+// block with its allocas first), then any unreachable blocks in layout order.
+static std::vector<IntraBlockNode *> orderedIntraBlockNodes(const ICFG *icfg) {
+  std::unordered_map<const BasicBlock *, IntraBlockNode *> nodes;
+  for (auto &pair : *icfg)
+    if (auto *blockNode = dyn_cast<IntraBlockNode>(pair.second))
+      if (const BasicBlock *bb = blockNode->getBasicBlock())
+        nodes.emplace(bb, blockNode);
+
+  std::vector<IntraBlockNode *> ordered;
+  ordered.reserve(nodes.size());
+  auto take = [&](const BasicBlock *bb) {
+    auto it = nodes.find(bb);
+    if (it == nodes.end())
+      return;
+    ordered.push_back(it->second);
+    nodes.erase(it);
+  };
+  if (const Module *M = getModuleFromICFG(icfg)) {
+    for (const Function &F : *M) {
+      if (F.isDeclaration())
+        continue;
+      for (const BasicBlock *bb : ReversePostOrderTraversal<const Function *>(&F))
+        take(bb);
+      for (const BasicBlock &bb : F)
+        take(&bb);
+    }
+  }
+  // Blocks outside the module's functions, if any, by node ID.
+  std::vector<IntraBlockNode *> rest;
+  for (auto &pair : nodes)
+    rest.push_back(pair.second);
+  std::sort(rest.begin(), rest.end(),
+            [](const IntraBlockNode *lhs, const IntraBlockNode *rhs) {
+              return lhs->getId() < rhs->getId();
+            });
+  ordered.insert(ordered.end(), rest.begin(), rest.end());
+  return ordered;
 }
 
 static const ICFGNode *getFunctionEntryICFGNode(const ICFG *icfg,
@@ -251,15 +300,8 @@ void SVFGBuilder::buildTopLevelNodes() {
     return nodeId;
   };
 
-  for (auto &pair : *icfg) {
-    ICFGNode *node = pair.second;
-    IntraBlockNode *blockNode = dyn_cast<IntraBlockNode>(node);
-    if (!blockNode)
-      continue;
-
+  for (IntraBlockNode *blockNode : orderedIntraBlockNodes(icfg)) {
     const BasicBlock *bb = blockNode->getBasicBlock();
-    if (!bb)
-      continue;
 
     for (const Instruction &inst : *bb) {
       // Always scan instruction operands for pointer constants/nulls so they
