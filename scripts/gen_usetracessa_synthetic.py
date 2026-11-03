@@ -11,7 +11,8 @@ history phis). Sites are split across --functions callees of main, so
 summaries are exercised.
 
 Uses:
-    Table 3 (memory vs k):  --sites 100 --aliases K   (objects default to K)
+    Table 3 (cost vs |U|):  --sweep-objects U1,U2,... --aliases K --sites-per-group 2
+    Memory vs k:            --sites 100 --aliases K   (objects default to K)
     RQ2 n x k heat map:     --noise N --aliases K
     RQ4 random programs:    --random --seed S (random events, noise, branches)
 
@@ -19,10 +20,17 @@ The same file feeds lotus-ir-usetracessa, lotus-ir-ufg and lotus-check; one
 program covers double-free, use-after-free and memory-leak (unfreed objects
 reach the exit).
 
+Objects are grouped k per global, and site i uses group i mod (|U| / k), so a
+group no site touches never reaches a free or dereference. --sites-per-group
+sets --sites to that multiple of the group count, which keeps every object
+relevant as |U| grows.
+
 Examples:
     python3 scripts/gen_usetracessa_synthetic.py --aliases 100 -o k100.ll
     python3 scripts/gen_usetracessa_synthetic.py --sweep-aliases 1,10,100,1000 \\
         --out-dir synthetic/
+    python3 scripts/gen_usetracessa_synthetic.py --sweep-objects 10,100,1000 \\
+        --sweep-aliases 1,10 --sites-per-group 2 --out-dir synthetic/
     python3 scripts/gen_usetracessa_synthetic.py --random --seed 7 -o r7.ll
 """
 import argparse
@@ -145,28 +153,48 @@ def main():
                         help="Random events, noise, branches and aliases (RQ4)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("-o", "--output", type=Path, help="Output .ll (default: stdout)")
+    parser.add_argument("--sites-per-group", type=int,
+                        help="Set --sites to this many sites per group of k objects, "
+                             "so every object is used")
     parser.add_argument("--sweep-aliases", type=int_list,
                         help="Write one program per k into --out-dir")
+    parser.add_argument("--sweep-objects", type=int_list,
+                        help="Write one program per |U| into --out-dir")
     parser.add_argument("--sweep-noise", type=int_list,
-                        help="With --sweep-aliases, write the n x k grid")
+                        help="Write one program per n into --out-dir")
     parser.add_argument("--out-dir", type=Path)
     args = parser.parse_args()
     if min(args.sites, args.aliases, args.functions) < 1 or args.noise < 0:
         parser.error("sites, aliases and functions must be positive; noise nonnegative")
-    options = dict(sites=args.sites, objects=args.objects, branch_every=args.branch_every,
-                   functions=args.functions, free_ratio=args.free_ratio,
-                   randomize=args.random, seed=args.seed)
-    if args.sweep_aliases:
+    if args.sites_per_group is not None and args.sites_per_group < 1:
+        parser.error("--sites-per-group must be positive")
+    options = dict(branch_every=args.branch_every, functions=args.functions,
+                   free_ratio=args.free_ratio, randomize=args.random, seed=args.seed)
+
+    def sites_for(aliases, objects):
+        if args.sites_per_group is None:
+            return args.sites
+        groups = (max(objects or aliases, aliases) + aliases - 1) // aliases
+        return groups * args.sites_per_group
+
+    if args.sweep_aliases or args.sweep_objects or args.sweep_noise:
         if not args.out_dir:
-            parser.error("--sweep-aliases requires --out-dir")
+            parser.error("--sweep-* requires --out-dir")
         args.out_dir.mkdir(parents=True, exist_ok=True)
         for noise in args.sweep_noise or [args.noise]:
-            for aliases in args.sweep_aliases:
-                name = f"syn-s{args.sites}-k{aliases}-n{noise}.ll"
-                (args.out_dir / name).write_text(
-                    generate(aliases=aliases, noise=noise, **options))
+            for objects in args.sweep_objects or [args.objects]:
+                for aliases in args.sweep_aliases or [args.aliases]:
+                    if objects is not None and objects < aliases:
+                        continue  # |U| >= k: the cell would repeat |U| = k
+                    sites = sites_for(aliases, objects)
+                    universe = f"-u{objects}" if objects is not None else ""
+                    name = f"syn-s{sites}-k{aliases}{universe}-n{noise}.ll"
+                    (args.out_dir / name).write_text(
+                        generate(sites=sites, aliases=aliases, objects=objects,
+                                 noise=noise, **options))
         return 0
-    text = generate(aliases=args.aliases, noise=args.noise, **options)
+    text = generate(sites=sites_for(args.aliases, args.objects), aliases=args.aliases,
+                    objects=args.objects, noise=args.noise, **options)
     if args.output:
         args.output.write_text(text)
     else:
