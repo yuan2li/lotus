@@ -2,6 +2,7 @@
 #include "IR/SVFG/SVFGBuilder.h"
 #include "IR/UseTraceSSA/DefectDetector.h"
 #include "IR/UseTraceSSA/FlowSensitivePointsTo.h"
+#include "IR/UseTraceSSA/PathFeasibility.h"
 #include "IR/UseTraceSSA/Query.h"
 #include "IR/UseTraceSSA/ResultExport.h"
 #include "IR/UseTraceSSA/SVFGBridge.h"
@@ -86,6 +87,16 @@ llvm::cl::opt<std::string> TemporalGraph(
     llvm::cl::desc("--check temporal graph: sparse (event/call skeleton) or "
                    "icfg (every instruction; the IDE-ICFG baseline)"),
     llvm::cl::init("sparse"));
+llvm::cl::opt<bool> PathFeasibilityCheck(
+    "path-feasibility",
+    llvm::cl::desc("--check: test the witnesses of every finding site for path "
+                   "feasibility (Saber-style branch conditions, Z3); a site is "
+                   "witness_infeasible when every object's witness is"),
+    llvm::cl::init(false));
+llvm::cl::opt<unsigned> PathFeasibilityTimeout(
+    "path-feasibility-timeout-ms",
+    llvm::cl::desc("Z3 budget per witness for --path-feasibility (default: 1000)"),
+    llvm::cl::init(1000));
 llvm::cl::opt<std::string> ResultsJSON(
     "results-json",
     llvm::cl::desc("With --check, write per-object statuses and findings "
@@ -250,6 +261,8 @@ int main(int argc, char **argv) {
     historyOptions.heapObjectsOnly = HeapObjectsOnly;
     if (flowSensitive) historyOptions.pointsTo = std::cref(*flowSensitive);
     historyOptions.denseControlFlow = TemporalGraph == "icfg";
+    NativeLocations locations;
+    if (PathFeasibilityCheck) historyOptions.locations = &locations;
     if (Timing)
       historyOptions.phaseTiming = [](const char *phase, double elapsed) {
         std::cerr << "timing_ms " << phase << '=' << elapsed << '\n';
@@ -262,14 +275,19 @@ int main(int argc, char **argv) {
     std::optional<DefectScan> checkReport;
     std::map<std::string, std::vector<std::size_t>> findingGroups;
     std::map<std::string, std::set<ObjectID>> findingObjects;
+    std::map<std::string, Feasibility> siteFeasibility;
+    std::map<std::string, std::set<ObjectID>> infeasibleObjects;
+    std::optional<PathFeasibilityStatistics> feasibilityStatistics;
+    double feasibilityMilliseconds = 0;
     std::optional<QueryResult> nodeQuery;
     if (!Check.empty()) {
       DefectKind kind = Check == "double-free" ? DefectKind::DoubleFree :
                         Check == "use-after-free" ? DefectKind::UseAfterFree :
                         Check == "memory-leak" ? DefectKind::MemoryLeak :
                                                  DefectKind::FileLeak;
-      DefectScanOptions scanOptions{!Quiet, !Quiet || ResultsWitnesses, false,
-                                    !Quiet || !ResultsJSON.empty()};
+      DefectScanOptions scanOptions{
+          !Quiet, !Quiet || ResultsWitnesses || PathFeasibilityCheck, false,
+          !Quiet || !ResultsJSON.empty() || PathFeasibilityCheck};
       scanOptions.fixedObjects = ObjectMode == "fixed";
       checkReport = DefectDetector(result.graph, options.depth, options.limits,
                                    options.mode)
@@ -288,6 +306,47 @@ int main(int argc, char **argv) {
           const auto &objects = checkReport->findings[index].objects;
           findingObjects[site].insert(objects.begin(), objects.end());
         }
+      }
+      if (PathFeasibilityCheck) {
+        // A site is feasible when one object's witness is, witness_infeasible
+        // when all are. Double frees and leaks are matched by allocation, so
+        // every object is checked and the infeasible ones are reported; a
+        // use-after-free site stops at its first feasible witness.
+        const bool perObject = kind != DefectKind::UseAfterFree;
+        const auto started = Clock::now();
+        PathFeasibilityOptions feasibilityOptions;
+        feasibilityOptions.timeoutMilliseconds = PathFeasibilityTimeout;
+        Automaton automaton = kind == DefectKind::DoubleFree   ? Automaton::doubleFree()
+                              : kind == DefectKind::UseAfterFree ? Automaton::useAfterFree()
+                              : kind == DefectKind::MemoryLeak   ? Automaton::memoryLeak()
+                                                                 : Automaton::fileLeak();
+        PathFeasibility checker(result.graph, locations, std::move(automaton),
+                                feasibilityOptions);
+        for (const auto &group : findingGroups) {
+          Feasibility verdict = Feasibility::Infeasible;
+          for (auto index : group.second) {
+            const auto &finding = checkReport->findings[index];
+            std::vector<std::optional<ObjectID>> objects(finding.objects.begin(),
+                                                         finding.objects.end());
+            if (objects.empty()) objects.push_back(finding.witnessObject);
+            for (const auto &object : objects) {
+              auto witness = checkReport->materialize(index, result.graph, object);
+              Feasibility answer = witness.result.found() && witness.witnessObject
+                                       ? checker.check(witness.result, *witness.witnessObject)
+                                       : Feasibility::Unknown;
+              if (answer == Feasibility::Infeasible && object)
+                infeasibleObjects[group.first].insert(*object);
+              if (answer == Feasibility::Feasible) verdict = Feasibility::Feasible;
+              else if (answer == Feasibility::Unknown && verdict != Feasibility::Feasible)
+                verdict = Feasibility::Unknown;
+              if (verdict == Feasibility::Feasible && !perObject) break;
+            }
+            if (verdict == Feasibility::Feasible && !perObject) break;
+          }
+          siteFeasibility[group.first] = verdict;
+        }
+        feasibilityStatistics = checker.statistics();
+        feasibilityMilliseconds = millis(started, Clock::now());
       }
     }
     if (query) {
@@ -390,6 +449,20 @@ int main(int argc, char **argv) {
         for (std::size_t bucket = 0; bucket < qs.pushSizes.size(); ++bucket)
           std::cout << (bucket ? "," : "") << qs.pushSizes[bucket];
         std::cout << '\n';
+        if (feasibilityStatistics) {
+          std::size_t sites[3] = {0, 0, 0};
+          for (const auto &site : siteFeasibility) ++sites[int(site.second)];
+          const auto &fs = *feasibilityStatistics;
+          std::cout << "feasible_sites=" << sites[int(Feasibility::Feasible)]
+                    << " infeasible_sites=" << sites[int(Feasibility::Infeasible)]
+                    << " feasibility_unknown_sites=" << sites[int(Feasibility::Unknown)]
+                    << " feasibility_witnesses=" << fs.witnesses
+                    << " infeasible_witnesses=" << fs.infeasible
+                    << " feasibility_segments=" << fs.segments
+                    << " unconstrained_segments=" << fs.unconstrainedSegments
+                    << " unlocated_nodes=" << fs.unlocatedNodes
+                    << " feasibility_ms=" << feasibilityMilliseconds << '\n';
+        }
         if (!Quiet && !scan.message.empty())
           std::cout << "message: " << scan.message << '\n';
         if (!Quiet)
@@ -452,7 +525,26 @@ int main(int argc, char **argv) {
             return findingSite(result.graph.node(checkReport->findings[index].sink));
           },
           witnessOf, objectKeys,
-          [&](ObjectID object) { return objectKeys.location(object); });
+          [&](ObjectID object) { return objectKeys.location(object); },
+          feasibilityStatistics
+              ? std::function<std::string(const std::string &)>(
+                    [&](const std::string &site) -> std::string {
+                      auto found = siteFeasibility.find(site);
+                      if (found == siteFeasibility.end()) return "unknown";
+                      return found->second == Feasibility::Feasible ? "feasible"
+                             : found->second == Feasibility::Infeasible
+                                 ? "witness_infeasible"
+                                 : "unknown";
+                    })
+              : std::function<std::string(const std::string &)>(),
+          feasibilityStatistics && Check != "use-after-free"
+              ? std::function<std::set<ObjectID>(const std::string &)>(
+                    [&](const std::string &site) {
+                      auto found = infeasibleObjects.find(site);
+                      return found == infeasibleObjects.end() ? std::set<ObjectID>{}
+                                                              : found->second;
+                    })
+              : std::function<std::set<ObjectID>(const std::string &)>());
     }
     if (Timing) {
       std::cerr << std::fixed << std::setprecision(3)

@@ -24,7 +24,7 @@ target_link_libraries(lotus-ir-control-dependence
 )
 
 add_executable(lotus-ir-usetracessa lotus-ir-usetracessa.cpp)
-target_link_libraries(lotus-ir-usetracessa PRIVATE CanaryUseTraceSSASVFG FlowSensitivePTA LLVMIRReader)
+target_link_libraries(lotus-ir-usetracessa PRIVATE CanaryUseTraceSSASVFG CanaryUseTraceSSAPath FlowSensitivePTA LLVMIRReader)
 
 add_executable(lotus-ir-ufg lotus-ir-ufg.cpp)
 target_link_libraries(lotus-ir-ufg PRIVATE CanaryUFG CanaryUseTraceSSASVFG FlowSensitivePTA LLVMIRReader)

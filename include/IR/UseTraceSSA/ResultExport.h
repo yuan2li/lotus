@@ -44,7 +44,9 @@ inline const char *statusText(QueryStatus status) {
 /// the union of their objects. siteOf names a finding's sink site; witnessOf,
 /// when set, returns the witness of a finding (called once per site);
 /// objectKey, when set, adds a run-independent name to every object, and
-/// objectLocation the source location of its allocation.
+/// objectLocation the source location of its allocation, feasibilityOf the
+/// path-feasibility verdict of a site and infeasibleOf its objects whose
+/// witnesses are infeasible.
 inline void writeResultsJSON(
     std::ostream &os, const std::string &tool, const std::string &check,
     const std::map<std::string, std::string> &configuration,
@@ -52,7 +54,9 @@ inline void writeResultsJSON(
     const std::function<std::string(std::size_t)> &siteOf,
     const std::function<std::vector<WitnessStep>(std::size_t)> &witnessOf = {},
     const std::function<std::string(ObjectID)> &objectKey = {},
-    const std::function<std::string(ObjectID)> &objectLocation = {}) {
+    const std::function<std::string(ObjectID)> &objectLocation = {},
+    const std::function<std::string(const std::string &)> &feasibilityOf = {},
+    const std::function<std::set<ObjectID>(const std::string &)> &infeasibleOf = {}) {
   std::map<std::string, std::pair<std::size_t, std::set<ObjectID>>> sites;
   for (std::size_t index = 0; index < scan.findings.size(); ++index) {
     auto &site = sites.emplace(siteOf(index), std::make_pair(index, std::set<ObjectID>{}))
@@ -107,6 +111,19 @@ inline void writeResultsJSON(
         os << (firstObject ? "" : ",");
         writeJSONString(os, objectKey(object));
         firstObject = false;
+      }
+      os << ']';
+    }
+    if (feasibilityOf) {
+      os << ",\"feasibility\":";
+      writeJSONString(os, feasibilityOf(site.first));
+    }
+    if (infeasibleOf) {
+      os << ",\"infeasible_objects\":[";
+      bool firstInfeasible = true;
+      for (auto object : infeasibleOf(site.first)) {
+        os << (firstInfeasible ? "" : ",") << object;
+        firstInfeasible = false;
       }
       os << ']';
     }
