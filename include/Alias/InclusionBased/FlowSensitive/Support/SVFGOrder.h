@@ -48,37 +48,63 @@ SVFGSCC computeSVFGSCCs(const lotus::analysis::SVFG &graph, InScope inScope) {
   std::unordered_set<NodeID> onStack;
   std::vector<const lotus::analysis::SVFGNode *> stack;
   int nextIndex = 0;
-  std::function<void(const lotus::analysis::SVFGNode *)> visit =
-      [&](const lotus::analysis::SVFGNode *node) {
-        index[node->getId()] = lowlink[node->getId()] = nextIndex++;
-        stack.push_back(node);
-        onStack.insert(node->getId());
-        for (const lotus::analysis::SVFGEdge *edge : node->getOutEdges()) {
-          const lotus::analysis::SVFGNode *successor =
-              edge ? edge->getDstNode() : nullptr;
-          if (!inScope(successor))
-            continue;
-          if (index.find(successor->getId()) == index.end()) {
-            visit(successor);
-            lowlink[node->getId()] =
-                std::min(lowlink[node->getId()], lowlink[successor->getId()]);
-          } else if (onStack.count(successor->getId()) != 0) {
-            lowlink[node->getId()] =
-                std::min(lowlink[node->getId()], index[successor->getId()]);
-          }
+  // Tarjan's algorithm with an explicit call stack: value-flow chains in
+  // whole programs are deep enough to overflow the native stack when each
+  // node is a recursive call. Nodes and edges are visited in the same order
+  // as the recursive formulation, so components come out identically.
+  struct Frame {
+    const lotus::analysis::SVFGNode *node;
+    std::size_t nextEdge;
+  };
+  std::vector<Frame> calls;
+  auto enter = [&](const lotus::analysis::SVFGNode *node) {
+    index[node->getId()] = lowlink[node->getId()] = nextIndex++;
+    stack.push_back(node);
+    onStack.insert(node->getId());
+    calls.push_back({node, 0});
+  };
+  auto visit = [&](const lotus::analysis::SVFGNode *root) {
+    enter(root);
+    while (!calls.empty()) {
+      Frame &frame = calls.back();
+      const lotus::analysis::SVFGNode *node = frame.node;
+      const auto &edges = node->getOutEdges();
+      bool descended = false;
+      while (frame.nextEdge < edges.size()) {
+        const lotus::analysis::SVFGEdge *edge = edges[frame.nextEdge++];
+        const lotus::analysis::SVFGNode *successor =
+            edge ? edge->getDstNode() : nullptr;
+        if (!inScope(successor))
+          continue;
+        if (index.find(successor->getId()) == index.end()) {
+          enter(successor); // invalidates `frame`
+          descended = true;
+          break;
         }
-        if (lowlink[node->getId()] != index[node->getId()])
-          return;
-        result.components.emplace_back();
-        do {
-          const lotus::analysis::SVFGNode *member = stack.back();
-          stack.pop_back();
-          onStack.erase(member->getId());
-          result.components.back().push_back(member);
-          if (member == node)
-            break;
-        } while (!stack.empty());
-      };
+        if (onStack.count(successor->getId()) != 0)
+          lowlink[node->getId()] =
+              std::min(lowlink[node->getId()], index[successor->getId()]);
+      }
+      if (descended)
+        continue;
+      calls.pop_back();
+      if (!calls.empty()) {
+        const NodeID parent = calls.back().node->getId();
+        lowlink[parent] = std::min(lowlink[parent], lowlink[node->getId()]);
+      }
+      if (lowlink[node->getId()] != index[node->getId()])
+        continue;
+      result.components.emplace_back();
+      do {
+        const lotus::analysis::SVFGNode *member = stack.back();
+        stack.pop_back();
+        onStack.erase(member->getId());
+        result.components.back().push_back(member);
+        if (member == node)
+          break;
+      } while (!stack.empty());
+    }
+  };
   for (const auto &entry : graph)
     if (inScope(entry.second) && index.find(entry.first) == index.end())
       visit(entry.second);
