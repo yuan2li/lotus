@@ -49,8 +49,10 @@ struct DefectScan {
   double searchMilliseconds = 0, reportingMilliseconds = 0;
   std::string message;
   /// Deferred proof recovery. Graph must be the unchanged graph used to scan.
-  DefectReport materialize(std::size_t finding,
-                           const TraceFlowGraph &graph) const;
+  /// `object` selects another object accepted at the finding's sink (one of
+  /// its `objects`); by default the finding's own witness object.
+  DefectReport materialize(std::size_t finding, const TraceFlowGraph &graph,
+                           std::optional<ObjectID> object = {}) const;
 
 private:
   friend class DefectDetector;
