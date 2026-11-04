@@ -518,6 +518,10 @@ bool nonHeapObject(const analysis::SVFG &svfg, ObjectID object) {
 ObjectSet resourceObjects(const analysis::SVFG &svfg, const llvm::Value *pointer,
                           bool allocationSites, const NativeHistoryOptions &options,
                           std::set<ObjectID> *excluded) {
+  // A null pointer addresses no object: free(NULL) releases nothing. Its
+  // empty points-to set would otherwise read as "any object".
+  if (llvm::isa<llvm::ConstantPointerNull>(pointer->stripPointerCasts()))
+    return ObjectSet::known({});
   std::optional<analysis::SVFGNodeBS> provided;
   if (options.pointsTo) provided = options.pointsTo(pointer);
   const auto &pointsTo = provided ? *provided : svfg.getObjectIds(pointer);
