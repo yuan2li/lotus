@@ -5,8 +5,9 @@ oracle  Differential oracle (RQ4). For each program, client and object
         granularity, compare UseTraceSSA batch on the sparse graph (the
         reference) with every other UseTraceSSA configuration and with UFG:
         the status of every object and the set of (sink site, object) findings.
-        Runs with different points-to sets (--ptas) or object scopes
-        (--object-scopes) are compared separately.
+        Runs with different points-to sets (--ptas), object scopes
+        (--object-scopes) or call passing (--pass-calls) are compared
+        separately.
         Reports the number of compared queries and lists every mismatch;
         exits with 1 when there is one.
 
@@ -88,8 +89,13 @@ def oracle(records):
     for record in records:
         if record["tool"] == "saber" or record.get("repeat", 0) != 0:
             continue
+        # Runs that pass over calls and runs that enter every callee may
+        # differ under a context bound; each is compared with its own sparse
+        # reference. Records from before the call bypass have no such field.
+        passing = record.get("pass_calls")
         key = (benchmark(record), record["bug_type"], record["object_granularity"],
-               record.get("pta") or "andersen", record.get("object_scope") or "heap")
+               record.get("pta") or "andersen", record.get("object_scope") or "heap",
+               "pass-calls" if passing in (None, True) else "enter-calls")
         groups.setdefault(key, []).append(record)
     compared = mismatches = 0
     for key in sorted(groups):
