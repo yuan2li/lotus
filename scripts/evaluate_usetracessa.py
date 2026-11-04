@@ -31,7 +31,7 @@ Examples:
     python3 scripts/evaluate_usetracessa.py --tools usetracessa \
         --object-modes batch,fixed --object-granularities site,abstract
     python3 scripts/evaluate_usetracessa.py --tools usetracessa \
-        --temporal-graphs sparse,icfg   # icfg is the IDE-ICFG configuration
+        --temporal-graphs sparse,icfg,svfg  # IDE-ICFG and SVFG-based baselines
     python3 scripts/evaluate_usetracessa.py --tools usetracessa,ufg \
         --ptas andersen,fspta           # pointer-analysis ablation
     python3 scripts/evaluate_usetracessa.py --tools usetracessa,ufg \
@@ -65,7 +65,7 @@ SABER_CHECKS = ("double-free", "use-after-free", "memory-leak", "file-leak")
 SABER_SMT_CHECKS = ("double-free", "memory-leak", "file-leak")
 OBJECT_MODES = ("batch", "fixed")
 OBJECT_GRANULARITIES = ("site", "abstract")
-TEMPORAL_GRAPHS = ("sparse", "icfg")
+TEMPORAL_GRAPHS = ("sparse", "icfg", "svfg")
 PTAS = ("andersen", "fspta")
 # Heap checks track heap objects (default) or every points-to object (earlier).
 OBJECT_SCOPES = ("heap", "all")
@@ -296,7 +296,7 @@ def parse_saber_output(stdout, stderr):
 
 def build_cmd(task, binaries, context_limit, budgets=None,
               context_mode="sensitive", saber_budgets=None, details=None,
-              witnesses=False, path_feasibility=False):
+              witnesses=False, path_feasibility=False, pass_calls=True):
     tool, bug_type, bc_path = task["tool"], task["bug_type"], task["bc_path"]
     if tool in ("usetracessa", "ufg"):
         cmd = [str(binaries[tool]), str(bc_path), "--quiet", "--timing",
@@ -304,7 +304,8 @@ def build_cmd(task, binaries, context_limit, budgets=None,
                f"--context-limit={context_limit if context_limit is not None else 'unlimited'}",
                f"--object-granularity={task['object_granularity']}",
                f"--svfg-mssa={task['svfg_mssa']}", f"--pta={task['pta']}",
-               f"--heap-objects-only={'true' if task['object_scope'] == 'heap' else 'false'}"]
+               f"--heap-objects-only={'true' if task['object_scope'] == 'heap' else 'false'}",
+               f"--pass-calls={'true' if pass_calls else 'false'}"]
         if tool == "usetracessa":
             cmd.append(f"--object-mode={task['object_mode']}")
             cmd.append(f"--temporal-graph={task['temporal_graph']}")
@@ -382,11 +383,12 @@ def details_name(index, task):
 def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
                  context_limit, budgets=None, context_mode="sensitive", saber_budgets=None,
                  details_dir=None, witnesses=False, benchmark_info=None,
-                 path_feasibility=False):
+                 path_feasibility=False, pass_calls=True):
     tool, bug_type, bc_path = task["tool"], task["bug_type"], task["bc_path"]
     details = details_dir / details_name(index, task) if details_dir else None
     cmd = build_cmd(task, binaries, context_limit, budgets, context_mode,
-                    saber_budgets, details, witnesses, path_feasibility)
+                    saber_budgets, details, witnesses, path_feasibility,
+                    pass_calls)
     execution = run_cmd_with_limits(cmd, timeout_s, mem_limit_gb)
     parsed = (parse_saber_output(execution["stdout"], execution["stderr"])
               if tool == "saber" else
@@ -576,7 +578,9 @@ def main():
     parser.add_argument("--temporal-graphs", type=choice_list(TEMPORAL_GRAPHS),
                         default=("sparse",),
                         help="UseTraceSSA temporal graph: sparse, icfg (IDE-ICFG: same "
-                             "solver on every instruction), or both (default: sparse)")
+                             "solver on every instruction), svfg (SVFG-based: per-event "
+                             "CFG searches for each object's next event, no history), "
+                             "or several (default: sparse)")
     parser.add_argument("--object-granularities", type=choice_list(OBJECT_GRANULARITIES),
                         default=("site",),
                         help="UseTraceSSA/UFG resource objects: site, abstract, or both "
@@ -599,6 +603,10 @@ def main():
                              "feasible_sites / infeasible_sites, and the details "
                              "JSON marks each site (and, for double-free and "
                              "leak checks, its infeasible objects)")
+    parser.add_argument("--pass-calls", choices=("true", "false"), default="true",
+                        help="UseTraceSSA/UFG: objects that no event of a call's "
+                             "targets concerns pass over the call (default), or "
+                             "false to send every object through every callee")
     parser.add_argument("--saber-smt", action="store_true",
                         help="Also run Saber with SMT path validation for leak, "
                              "double-free, and file checks (RQ4 only)")
@@ -703,7 +711,8 @@ def main():
         "timeout_s": args.timeout, "mem_limit_gb": args.mem_limit_gb,
         "max_workers": args.max_workers, "context": context_mode,
         "context_limit": context_limit, "ir_budgets": budgets,
-        "saber_budgets": saber_budgets})
+        "saber_budgets": saber_budgets,
+        "pass_calls": args.pass_calls == "true"})
     print(f"Benchmarks: {len(benchmarks)}  Tools: {','.join(tools)}")
     print(f"Tasks: {len(tasks)}  Workers: {args.max_workers}  Repeat: {args.repeat}"
           f"{'  Preset: ' + args.preset if args.preset else ''}")
@@ -730,7 +739,8 @@ def main():
                             context_limit, budgets, context_mode, saber_budgets,
                             args.details_dir, args.witnesses,
                             benchmark_info.get(task["bc_path"]),
-                            args.path_feasibility): index
+                            args.path_feasibility,
+                            args.pass_calls == "true"): index
             for index, task in enumerate(tasks)
         }
         for future in concurrent.futures.as_completed(futures):
