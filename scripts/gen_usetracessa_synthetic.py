@@ -2,10 +2,10 @@
 """Generate synthetic LLVM 14 IR (.ll) for the UseTraceSSA experiments.
 
 Each program allocates --objects heap objects (one malloc site each) and
-stores them into pointer globals, --aliases objects per global, so a load from
-a global may point to k = --aliases objects under any flow-insensitive pointer
-analysis. --sites relevant sites then load a global and either free the
-pointer or dereference it; --noise irrelevant integer instructions follow each
+stores them into pointer slots, --aliases objects per slot, so a load from a
+slot may point to k = --aliases objects under any flow-insensitive pointer
+analysis. --sites relevant sites then load a slot and either free the pointer
+or dereference it; --noise irrelevant integer instructions follow each
 site, and every --branch-every sites the code forks into a diamond (a join for
 history phis). Sites are split across --functions callees of main, so
 summaries are exercised.
@@ -20,7 +20,13 @@ The same file feeds lotus-ir-usetracessa, lotus-ir-ufg and lotus-check; one
 program covers double-free, use-after-free and memory-leak (unfreed objects
 reach the exit).
 
-Objects are grouped k per global, and site i uses group i mod (|U| / k), so a
+By default (--carrier struct) the slots are the fields of a struct that main
+allocates on its stack and passes to every callee. --carrier global uses one
+pointer global per slot instead; Saber (lotus-check) skips every allocation
+whose value reaches a global, as SVF's Saber does, so it reports no
+double-free or leak on those programs.
+
+Objects are grouped k per slot, and site i uses group i mod (|U| / k), so a
 group no site touches never reaches a free or dereference. --sites-per-group
 sets --sites to that multiple of the group count, which keeps every object
 relevant as |U| grows. --free-ratio applies to each group's uses in order, so
@@ -41,7 +47,7 @@ import sys
 
 
 def generate(sites=100, aliases=10, objects=None, noise=5, branch_every=10,
-             functions=4, free_ratio=0.5, randomize=False, seed=0):
+             functions=4, free_ratio=0.5, randomize=False, seed=0, carrier="struct"):
     rng = random.Random(seed)
     objects = max(objects or aliases, aliases)
     groups = (objects + aliases - 1) // aliases
@@ -64,19 +70,33 @@ def generate(sites=100, aliases=10, objects=None, noise=5, branch_every=10,
     lines = [
         f"; UseTraceSSA synthetic program: sites={sites} aliases={aliases} "
         f"objects={objects} noise={noise} branch_every={branch_every} "
-        f"functions={functions} random={randomize} seed={seed}",
+        f"functions={functions} random={randomize} seed={seed}"
+        + (f" carrier={carrier}" if carrier != "global" else ""),
         "declare i8* @malloc(i64)",
         "declare void @free(i8*)",
         "",
     ]
-    lines += [f"@g{group} = internal global i8* null" for group in range(groups)]
+    if carrier == "global":
+        lines += [f"@g{group} = internal global i8* null" for group in range(groups)]
+        parameters, arguments = "", ""
+    else:
+        lines.append("%slots = type { " + ", ".join(["i8*"] * groups) + " }")
+        parameters, arguments = "%slots* %s, ", "%slots* %s, "
     lines.append("")
+
+    def slot(group, body, name):
+        """Address of a group's slot; struct slots need a field GEP first."""
+        if carrier == "global":
+            return f"@g{group}"
+        body.append(f"  %s{name} = getelementptr inbounds %slots, %slots* %s, "
+                    f"i32 0, i32 {group}")
+        return f"%s{name}"
 
     per_function = [sites // functions + (1 if f < sites % functions else 0)
                     for f in range(functions)]
     index = 0
     for function, count in enumerate(per_function):
-        body = [f"define void @f{function}(i32 %x) {{", "entry:"]
+        body = [f"define void @f{function}({parameters}i32 %x) {{", "entry:"]
         value, temp, block = "%x", 0, 0
 
         def emit_noise(amount):
@@ -92,7 +112,8 @@ def generate(sites=100, aliases=10, objects=None, noise=5, branch_every=10,
             temp += 1
             pointer = f"%p{temp}"
             if event != "none":
-                body.append(f"  {pointer} = load i8*, i8** @g{group_of(index)}")
+                address = slot(group_of(index), body, temp)
+                body.append(f"  {pointer} = load i8*, i8** {address}")
             if event == "free":
                 body.append(f"  call void @free(i8* {pointer})")
             elif event == "deref":
@@ -124,11 +145,14 @@ def generate(sites=100, aliases=10, objects=None, noise=5, branch_every=10,
         lines += body
 
     lines += ["define i32 @main() {", "entry:"]
+    if carrier != "global":
+        lines.append("  %s = alloca %slots")
     for obj in range(objects):
         lines.append(f"  %a{obj} = call i8* @malloc(i64 8)")
-        lines.append(f"  store i8* %a{obj}, i8** @g{obj // aliases}")
+        address = slot(obj // aliases, lines, f"a{obj}")
+        lines.append(f"  store i8* %a{obj}, i8** {address}")
     for function in range(functions):
-        lines.append(f"  call void @f{function}(i32 {function + 1})")
+        lines.append(f"  call void @f{function}({arguments}i32 {function + 1})")
     lines += ["  ret i32 0", "}", ""]
     return "\n".join(lines)
 
@@ -156,6 +180,9 @@ def main():
     parser.add_argument("--random", action="store_true",
                         help="Random events, noise, branches and aliases (RQ4)")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--carrier", choices=("struct", "global"), default="struct",
+                        help="Slots holding the objects: fields of a stack struct "
+                             "passed to the callees (default), or pointer globals")
     parser.add_argument("-o", "--output", type=Path, help="Output .ll (default: stdout)")
     parser.add_argument("--sites-per-group", type=int,
                         help="Set --sites to this many sites per group of k objects, "
@@ -173,7 +200,8 @@ def main():
     if args.sites_per_group is not None and args.sites_per_group < 1:
         parser.error("--sites-per-group must be positive")
     options = dict(branch_every=args.branch_every, functions=args.functions,
-                   free_ratio=args.free_ratio, randomize=args.random, seed=args.seed)
+                   free_ratio=args.free_ratio, randomize=args.random, seed=args.seed,
+                   carrier=args.carrier)
 
     def sites_for(aliases, objects):
         if args.sites_per_group is None:
