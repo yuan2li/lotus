@@ -785,15 +785,9 @@ void appendTemporalFacts(
       if (exit->first < item.second.nativeBlocks.size())
         normal = llvm::isa<llvm::ReturnInst>(
             item.second.nativeBlocks[exit->first]->getTerminator());
-      if (normal) {
-        if (plan.property.exits &&
-            result.graph.layer(history.id)
-                .history.use(exit->second, history.execution))
-          result.graph.annotate(
-              result.graph.after(history.id, exit->second, history.execution),
-              Event::Exit);
+      if (normal)
         ++exit;
-      } else
+      else
         exit = history.exits.erase(exit);
     }
     if (options.locations)
@@ -818,6 +812,7 @@ void appendTemporalFacts(
                                        ':' + std::to_string(location.getCol()));
   }
   timer.finish("usetracessa_history");
+  std::set<FunctionID> called;
   for (const auto *call : plan.calls) {
     const auto *callee = call->getCalledFunction();
     std::vector<const TemporalHistory *> targets;
@@ -845,7 +840,22 @@ void appendTemporalFacts(
     TemporalHistory::connectCallTargets(result.graph, caller, site,
                                         reinterpret_cast<std::uintptr_t>(call),
                                         targets);
+    for (const auto *target : targets) called.insert(target->id);
   }
+  // Program exit is the normal return of a root function, one no call enters
+  // (the leak sinks of queries::memoryLeak). A callee's return continues in
+  // its caller: an Exit there would leak every allocated object that merely
+  // passes through the callee.
+  if (plan.property.exits)
+    for (const auto &item : histories) {
+      const auto &history = item.second;
+      if (called.count(history.id)) continue;
+      for (const auto &exit : history.exits)
+        if (result.graph.layer(history.id).history.use(exit.second, history.execution))
+          result.graph.annotate(
+              result.graph.after(history.id, exit.second, history.execution),
+              Event::Exit);
+    }
   timer.finish("usetracessa_calls");
 }
 
