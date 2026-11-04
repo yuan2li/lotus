@@ -756,6 +756,49 @@ TEST(UseTraceSSANative, CompactLabelsAndSparseProvenancePreserveEffects) {
             std::string::npos);
 }
 
+TEST(UseTraceSSANative, CalleeReturnsAreNotProgramExits) {
+  llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
+  auto module = llvm::parseAssemblyString(R"IR(
+    declare i8* @malloc(i64)
+    declare void @free(i8*)
+    define void @idle() {
+      ret void
+    }
+    define void @inner() {
+      %lost = call i8* @malloc(i64 8)
+      ret void
+    }
+    define i32 @main() {
+      %kept = call i8* @malloc(i64 8)
+      call void @idle()
+      call void @inner()
+      call void @free(i8* %kept)
+      ret i32 0
+    }
+  )IR", diagnostic, context);
+  ASSERT_TRUE(module);
+  lotus::analysis::SVFG svfg;
+  for (const auto &function : *module)
+    for (const auto &instruction : llvm::instructions(function)) {
+      if (instruction.getName() == "kept") svfg.addObjectForValue(&instruction, 10);
+      if (instruction.getName() == "lost") svfg.addObjectForValue(&instruction, 11);
+    }
+  auto result = buildUseTraceSSAFromLotusSVFG(svfg, *module, NativeHistoryMode::MemoryLeak);
+  // Only @main's return is a program exit.
+  auto exits = result.graph.select(Event::Exit);
+  ASSERT_EQ(exits.size(), 1u);
+  EXPECT_EQ(result.graph.node(exits[0]).label.rfind("main.", 0), 0u);
+  // %kept passes @idle and @inner before it is freed: no leak (Unknown, not
+  // NotFound, since external malloc/free leave the model incomplete). %lost
+  // leaks at the program exit, after @inner returns.
+  auto scan = DefectDetector(result.graph, 3).scan(DefectKind::MemoryLeak);
+  EXPECT_NE(scan.objectStatus.at(10), QueryStatus::Found);
+  EXPECT_EQ(scan.objectStatus.at(11), QueryStatus::Found);
+  ASSERT_EQ(scan.findings.size(), 1u);
+  EXPECT_EQ(scan.findings[0].objects, std::vector<ObjectID>({11}));
+  expectFixedMatchesBatch(result.graph, DefectKind::MemoryLeak);
+}
+
 TEST(UseTraceSSANative, UnreachableIsNotANormalLeakExit) {
   llvm::LLVMContext context;
   llvm::SMDiagnostic diagnostic;
