@@ -54,6 +54,12 @@ llvm::cl::opt<bool> HeapObjectsOnly(
                    "and constant points-to objects (default: true; false keeps "
                    "every object, the earlier behavior)"),
     llvm::cl::init(true));
+llvm::cl::opt<bool> PassCalls(
+    "pass-calls",
+    llvm::cl::desc("--check: objects that no event of a call's targets concerns "
+                   "pass over the call (default); false sends every object "
+                   "through every callee"),
+    llvm::cl::init(true));
 llvm::cl::opt<std::string> PointerAnalysis(
     "pta",
     llvm::cl::desc("Points-to sets of event pointers: andersen (the SVFG's) or "
@@ -227,6 +233,7 @@ int main(int argc, char **argv) {
     historyOptions.instructionText = Check.empty() || !Quiet || FullLabels;
     historyOptions.allocationSiteObjects = ObjectGranularity == "site";
     historyOptions.heapObjectsOnly = HeapObjectsOnly;
+    historyOptions.passCalls = PassCalls;
     if (flowSensitive) historyOptions.pointsTo = std::cref(*flowSensitive);
     auto result =
         buildUseTraceSSAFromLotusSVFG(*svfg, *module, mode, historyOptions);

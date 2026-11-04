@@ -639,13 +639,22 @@ TEST(UseTraceSSANative, MultipleCallersCannotExchangeReturns) {
   ASSERT_TRUE(m); lotus::analysis::SVFG svfg;
   for (const char *name : {"one","two"})
     svfg.addObjectForValue(m->getFunction(name)->getArg(0),42);
-  auto r=buildUseTraceSSAFromLotusSVFG(svfg,*m,NativeHistoryMode::UseAfterFree);
+  // Every object enters @shared: only call matching keeps @one's free from
+  // returning into @two.
+  NativeHistoryOptions entering;
+  entering.passCalls = false;
+  auto r=buildUseTraceSSAFromLotusSVFG(svfg,*m,NativeHistoryMode::UseAfterFree,entering);
   auto q=queries::useAfterFree(r.graph); q.memoryObject=42;
   EXPECT_FALSE(QueryEngine(r.graph).run(q).found());
   q.memoryObject.reset();
   EXPECT_FALSE(QueryEngine(r.graph).runObjects({q,ObjectUniverse({42})}).found.any());
   q.context=ContextMode::Insensitive;
   EXPECT_TRUE(QueryEngine(r.graph).runObjects({q,ObjectUniverse({42})}).found.any());
+  // @shared has no event of 42, so 42 passes over it: no exchange even
+  // without context.
+  auto passing=buildUseTraceSSAFromLotusSVFG(svfg,*m,NativeHistoryMode::UseAfterFree);
+  auto p=queries::useAfterFree(passing.graph); p.context=ContextMode::Insensitive;
+  EXPECT_FALSE(QueryEngine(passing.graph).runObjects({p,ObjectUniverse({42})}).found.any());
 }
 TEST(UseTraceSSANative, NoReturnAndRecursion) {
   llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;

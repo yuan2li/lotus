@@ -13,6 +13,7 @@
 #include <unordered_map>
 
 #include <llvm/ADT/DenseMap.h>
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Dominators.h>
@@ -741,6 +742,165 @@ void recordPoints(const TraceFlowGraph &graph, const Layout &layout,
   }
 }
 
+/// Defined targets of a call: its callee, or the callees the pointer analysis
+/// resolved for an indirect call.
+std::vector<const llvm::Function *>
+callTargets(const llvm::CallBase *call,
+            const std::map<const llvm::Function *, Layout> &layouts,
+            const ResourcePlan &plan) {
+  std::vector<const llvm::Function *> targets;
+  if (const auto *callee = call->getCalledFunction()) {
+    if (layouts.count(callee)) targets.push_back(callee);
+  } else if (auto resolved = plan.indirect.find(call); resolved != plan.indirect.end()) {
+    for (const auto *target : resolved->second)
+      if (layouts.count(target)) targets.push_back(target);
+  }
+  return targets;
+}
+
+/// Interprocedural summary of the spliced calls (reachable, non-invoke calls
+/// with defined targets), shared by the sparse history and the SVFG-based
+/// baseline so that both pass over the same calls.
+struct CallSummary {
+  /// Objects with an event in some target or in its transitive callees;
+  /// unknown when such an event has an unknown guard.
+  ObjectSet concerned = ObjectSet::known({});
+  /// Some target has a path to a normal return.
+  bool returns = false;
+};
+
+std::unordered_map<const llvm::CallBase *, CallSummary>
+summarizeCalls(const std::map<const llvm::Function *, Layout> &layouts,
+               const ResourcePlan &plan) {
+  struct Summary {
+    bool top = false;
+    std::vector<ObjectID> objects;
+    std::vector<std::pair<const llvm::CallBase *, std::vector<const llvm::Function *>>> calls;
+    llvm::SmallPtrSet<const llvm::BasicBlock *, 32> reachable;
+  };
+  std::map<const llvm::Function *, Summary> functions;
+  for (const auto &item : layouts) {
+    auto &summary = functions[item.first];
+    llvm::SmallVector<const llvm::BasicBlock *, 32> pending{&item.first->getEntryBlock()};
+    summary.reachable.insert(pending.back());
+    while (!pending.empty()) {
+      const auto *block = pending.pop_back_val();
+      for (const auto *successor : llvm::successors(block))
+        if (summary.reachable.insert(successor).second) pending.push_back(successor);
+      for (const auto &instruction : *block) {
+        const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+        if (!call || llvm::isa<llvm::InvokeInst>(call)) continue;
+        auto targets = callTargets(call, layouts, plan);
+        if (!targets.empty()) summary.calls.emplace_back(call, std::move(targets));
+      }
+    }
+  }
+  auto add = [](Summary &into, bool top, const std::vector<ObjectID> &objects) {
+    if (into.top) return false;
+    if (top) {
+      into.top = true;
+      into.objects.clear();
+      return true;
+    }
+    std::vector<ObjectID> merged;
+    std::set_union(into.objects.begin(), into.objects.end(), objects.begin(),
+                   objects.end(), std::back_inserter(merged));
+    if (merged.size() == into.objects.size()) return false;
+    into.objects = std::move(merged);
+    return true;
+  };
+  for (const auto &entry : plan.effects) {
+    const auto *instruction = entry.first.first;
+    auto &summary = functions.at(instruction->getFunction());
+    if (summary.reachable.count(instruction->getParent()))
+      add(summary, entry.second.objects.isUnknown(), entry.second.objects.objects());
+  }
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (auto &item : functions)
+      for (const auto &call : item.second.calls)
+        for (const auto *target : call.second) {
+          const auto &callee = functions.at(target);
+          changed |= add(item.second, callee.top, callee.objects);
+        }
+  }
+  // A function returns if a normal return is reachable without passing a
+  // call none of whose targets returns.
+  std::set<const llvm::Function *> returning;
+  std::unordered_map<const llvm::CallBase *, const std::vector<const llvm::Function *> *> targetsOf;
+  for (const auto &item : functions)
+    for (const auto &call : item.second.calls) targetsOf[call.first] = &call.second;
+  auto callReturns = [&](const std::vector<const llvm::Function *> &targets) {
+    return std::any_of(targets.begin(), targets.end(),
+                       [&](const llvm::Function *target) { return returning.count(target); });
+  };
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (const auto &item : functions) {
+      if (returning.count(item.first)) continue;
+      llvm::SmallPtrSet<const llvm::BasicBlock *, 32> visited;
+      llvm::SmallVector<const llvm::BasicBlock *, 32> pending{&item.first->getEntryBlock()};
+      visited.insert(pending.back());
+      bool exits = false;
+      while (!pending.empty() && !exits) {
+        const auto *block = pending.pop_back_val();
+        bool blocked = false;
+        for (const auto &instruction : *block)
+          if (const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction))
+            if (auto targets = targetsOf.find(call);
+                targets != targetsOf.end() && !callReturns(*targets->second)) {
+              blocked = true;
+              break;
+            }
+        if (blocked) continue;
+        exits = llvm::isa<llvm::ReturnInst>(block->getTerminator());
+        for (const auto *successor : llvm::successors(block))
+          if (visited.insert(successor).second) pending.push_back(successor);
+      }
+      if (exits) {
+        returning.insert(item.first);
+        changed = true;
+      }
+    }
+  }
+  std::unordered_map<const llvm::CallBase *, CallSummary> result;
+  for (const auto &item : functions)
+    for (const auto &call : item.second.calls) {
+      Summary concerned;
+      for (const auto *target : call.second) {
+        const auto &callee = functions.at(target);
+        add(concerned, callee.top, callee.objects);
+      }
+      auto &summary = result[call.first];
+      summary.returns = callReturns(call.second);
+      summary.concerned = concerned.top ? ObjectSet::unknown()
+                                        : ObjectSet::known(std::move(concerned.objects));
+    }
+  return result;
+}
+
+/// Objects of `universe` that may pass over a call: those its targets do not
+/// concern, when some target returns (the others enter the targets).
+std::vector<ObjectID> passingObjects(const CallSummary &summary,
+                                     const std::vector<ObjectID> &universe) {
+  std::vector<ObjectID> passing;
+  if (!summary.returns || summary.concerned.isUnknown()) return passing;
+  const auto &concerned = summary.concerned.objects();
+  std::set_difference(universe.begin(), universe.end(), concerned.begin(),
+                      concerned.end(), std::back_inserter(passing));
+  return passing;
+}
+
+/// Object universe of a property graph: its sources, or every guarded object
+/// plus the unknown-resource sentinel when a source guard is unknown.
+std::vector<ObjectID> propertyUniverse(const TraceFlowGraph &graph, const ResourcePlan &plan) {
+  std::vector<ObjectID> universe =
+      plan.universe.isUnknown() ? graph.resourceCandidates() : plan.universe.objects();
+  std::sort(universe.begin(), universe.end());
+  universe.erase(std::unique(universe.begin(), universe.end()), universe.end());
+  return universe;
+}
+
 void appendTemporalFacts(
     SVFGHistoryResult &result, const analysis::SVFG &svfg,
     const std::map<const llvm::Function *, Layout> &layouts,
@@ -812,19 +972,17 @@ void appendTemporalFacts(
                                        ':' + std::to_string(location.getCol()));
   }
   timer.finish("usetracessa_history");
+  std::unordered_map<const llvm::CallBase *, CallSummary> summaries;
+  std::vector<ObjectID> universe;
+  if (options.passCalls && plan.property.required != Event::None && !plan.calls.empty()) {
+    summaries = summarizeCalls(layouts, plan);
+    universe = propertyUniverse(result.graph, plan);
+  }
   std::set<FunctionID> called;
   for (const auto *call : plan.calls) {
-    const auto *callee = call->getCalledFunction();
     std::vector<const TemporalHistory *> targets;
-    if (callee) {
-      if (histories.count(callee))
-        targets.push_back(&histories.at(callee));
-    } else if (auto resolved = plan.indirect.find(call);
-               resolved != plan.indirect.end()) {
-      for (const auto *target : resolved->second)
-        if (histories.count(target))
-          targets.push_back(&histories.at(target));
-    }
+    for (const auto *target : callTargets(call, layouts, plan))
+      targets.push_back(&histories.at(target));
     if (targets.empty())
       continue;
     const auto &caller = histories.at(call->getFunction());
@@ -837,9 +995,25 @@ void appendTemporalFacts(
           "exceptional temporal call exits require edge-specific modeling");
       continue;
     }
+    // Objects the targets do not concern pass over the call on a guarded
+    // history edge; only the others enter the targets.
+    ObjectSet entering = ObjectSet::unknown();
+    std::vector<ObjectID> passing;
+    if (auto summary = summaries.find(call); summary != summaries.end()) {
+      passing = passingObjects(summary->second, universe);
+      if (!passing.empty()) entering = summary->second.concerned;
+    }
     TemporalHistory::connectCallTargets(result.graph, caller, site,
                                         reinterpret_cast<std::uintptr_t>(call),
-                                        targets);
+                                        targets, true, entering);
+    if (!passing.empty()) {
+      FlowEdge bypass;
+      bypass.from = caller.before(result.graph, site);
+      bypass.to = caller.after(result.graph, site);
+      bypass.kind = FlowKind::History;
+      bypass.objects = ObjectSet::known(std::move(passing));
+      result.graph.addEdge(std::move(bypass));
+    }
     for (const auto *target : targets) called.insert(target->id);
   }
   // Program exit is the normal return of a root function, one no call enters
