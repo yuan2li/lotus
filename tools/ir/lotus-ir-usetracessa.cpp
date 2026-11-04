@@ -84,8 +84,10 @@ llvm::cl::opt<std::string> ObjectMode(
     llvm::cl::init("batch"));
 llvm::cl::opt<std::string> TemporalGraph(
     "temporal-graph",
-    llvm::cl::desc("--check temporal graph: sparse (event/call skeleton) or "
-                   "icfg (every instruction; the IDE-ICFG baseline)"),
+    llvm::cl::desc("--check temporal graph: sparse (event/call skeleton), "
+                   "icfg (every instruction; the IDE-ICFG baseline) or svfg "
+                   "(per-event CFG searches for each object's next event, no "
+                   "history; the SVFG-based baseline)"),
     llvm::cl::init("sparse"));
 llvm::cl::opt<bool> PassCalls(
     "pass-calls",
@@ -186,8 +188,8 @@ int main(int argc, char **argv) {
     llvm::errs() << "lotus-ir-usetracessa: --object-mode must be batch or fixed\n";
     return 1;
   }
-  if (TemporalGraph != "sparse" && TemporalGraph != "icfg") {
-    llvm::errs() << "lotus-ir-usetracessa: --temporal-graph must be sparse or icfg\n";
+  if (TemporalGraph != "sparse" && TemporalGraph != "icfg" && TemporalGraph != "svfg") {
+    llvm::errs() << "lotus-ir-usetracessa: --temporal-graph must be sparse, icfg or svfg\n";
     return 1;
   }
   if (Format != "text" && Format != "json" && Format != "dot") {
@@ -267,6 +269,7 @@ int main(int argc, char **argv) {
     historyOptions.heapObjectsOnly = HeapObjectsOnly;
     if (flowSensitive) historyOptions.pointsTo = std::cref(*flowSensitive);
     historyOptions.denseControlFlow = TemporalGraph == "icfg";
+    historyOptions.eventOrder = TemporalGraph == "svfg";
     historyOptions.passCalls = PassCalls;
     NativeLocations locations;
     if (PathFeasibilityCheck) historyOptions.locations = &locations;
@@ -380,6 +383,7 @@ int main(int argc, char **argv) {
                 << " history_nodes=" << stats.historyNodes
                 << " history_psi=" << stats.historyPsiNodes
                 << " history_phi=" << stats.historyPhiNodes
+                << " flow_nodes=" << result.graph.nodes().size()
                 << " flow_edges=" << stats.flowEdges
                 << " guarded_effects=" << stats.guardedEffects
                 << " known_object_cardinality=" << stats.knownObjectCardinality
@@ -421,7 +425,13 @@ int main(int argc, char **argv) {
       std::cout << " icfg_nodes=" << icfg.getTotalNodeNum()
                 << " icfg_edges=" << icfg.getTotalEdgeNum()
                 << " ir_functions=" << functions << " ir_blocks=" << blocks
-                << " ir_instructions=" << instructions << '\n';
+                << " ir_instructions=" << instructions;
+      if (result.eventOrder)
+        std::cout << " ordering_searches=" << result.eventOrder->searches
+                  << " ordering_block_visits=" << result.eventOrder->blockVisits
+                  << " ordering_edges=" << result.eventOrder->edges
+                  << " ordering_edge_objects=" << result.eventOrder->edgeObjects;
+      std::cout << '\n';
       if (!Quiet)
         for (const auto &issue : result.graph.issues())
           std::cout << "issue: " << issue << '\n';

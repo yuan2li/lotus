@@ -12,6 +12,7 @@
 #include <tuple>
 #include <unordered_map>
 
+#include <llvm/ADT/BitVector.h>
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/IR/CFG.h>
@@ -742,6 +743,25 @@ void recordPoints(const TraceFlowGraph &graph, const Layout &layout,
   }
 }
 
+/// Native provenance of each effect instruction: the smallest SVFG node
+/// anchored at it. Only event sites consume it; a sparse resource check must
+/// not allocate an entry for every instruction of a multi-million-node SVFG.
+std::unordered_map<const llvm::Instruction *, NativeID>
+effectProvenance(const analysis::SVFG &svfg, const ResourcePlan &plan) {
+  std::unordered_map<const llvm::Instruction *, NativeID> provenance;
+  provenance.reserve(plan.effects.size());
+  for (const auto &effect : plan.effects)
+    provenance.emplace(effect.first.first, NoNativeID);
+  if (!provenance.empty())
+    for (const auto &item : svfg)
+      if (const auto *instruction = anchor(*item.second)) {
+        auto it = provenance.find(instruction);
+        if (it != provenance.end())
+          it->second = std::min<NativeID>(it->second, item.second->getId());
+      }
+  return provenance;
+}
+
 /// Defined targets of a call: its callee, or the callees the pointer analysis
 /// resolved for an indirect call.
 std::vector<const llvm::Function *>
@@ -908,20 +928,7 @@ void appendTemporalFacts(
     const NativeHistoryOptions &options) {
   PhaseTimer timer(options);
   std::map<const llvm::Function *, std::vector<TemporalEffect>> effects;
-  // Only event sites consume native provenance. A sparse resource check must
-  // not allocate a tree entry for every instruction in a multi-million-node
-  // SVFG.
-  std::unordered_map<const llvm::Instruction *, NativeID> provenance;
-  provenance.reserve(plan.effects.size());
-  for (const auto &effect : plan.effects)
-    provenance.emplace(effect.first.first, NoNativeID);
-  if (!provenance.empty())
-    for (const auto &item : svfg)
-      if (const auto *instruction = anchor(*item.second)) {
-        auto it = provenance.find(instruction);
-        if (it != provenance.end())
-          it->second = std::min<NativeID>(it->second, item.second->getId());
-      }
+  auto provenance = effectProvenance(svfg, plan);
   for (const auto &entry : plan.effects) {
     const auto *instruction = entry.first.first;
     const auto &effect = entry.second;
@@ -1033,6 +1040,317 @@ void appendTemporalFacts(
   timer.finish("usetracessa_calls");
 }
 
+/// SVFG-based baseline (NativeHistoryOptions::eventOrder). The nodes are the
+/// sparse history's sites, without psi/phi: one node per event site, a call's
+/// before and after ports, and each function's entry and normal exits. The
+/// temporal order is not precomputed: every entry, event and call-return node
+/// searches the LLVM CFG with the mask of objects it carries and stops each
+/// object at the first site that concerns it, linking to that site with an
+/// edge guarded by the stopped objects. A call concerns the objects with an
+/// event anywhere in its callees, and
+/// every object when none of its callees can return (or when calls are not
+/// passed over).
+void appendEventOrderFacts(
+    SVFGHistoryResult &result, const analysis::SVFG &svfg,
+    const std::map<const llvm::Function *, Layout> &layouts,
+    FunctionID firstLayer, const ResourcePlan &plan,
+    const NativeHistoryOptions &options) {
+  PhaseTimer timer(options);
+  auto &graph = result.graph;
+  auto provenance = effectProvenance(svfg, plan);
+  timer.finish("usetracessa_provenance");
+
+  struct Guard {
+    bool top = false;
+    llvm::BitVector bits;
+  };
+  struct Stop {
+    FlowNodeID node = InvalidFlowID;     // event node, or a call's before port
+    FlowNodeID after = InvalidFlowID;    // a call's after port
+    const llvm::CallBase *call = nullptr;
+    std::vector<const llvm::Function *> targets;
+    const ObjectSet *objects = nullptr;  // an event's guard
+    Guard guard;
+  };
+  struct BlockOrder {
+    std::vector<std::size_t> stops;
+    FlowNodeID exit = InvalidFlowID;
+  };
+  struct FunctionOrder {
+    FunctionID id = InvalidID;
+    FlowNodeID entry = InvalidFlowID;
+    std::vector<FlowNodeID> exits;
+    std::vector<std::size_t> events, calls;
+    llvm::DenseMap<const llvm::BasicBlock *, BlockOrder> blocks;
+  };
+  std::vector<Stop> stops;
+  std::map<const llvm::Function *, FunctionOrder> functions;
+
+  std::map<const llvm::Function *,
+           std::map<SiteID, std::pair<const llvm::Instruction *, const GuardedEventEffect *>>>
+      effectsAt;
+  for (const auto &entry : plan.effects) {
+    const auto *instruction = entry.first.first;
+    const auto &layout = layouts.at(instruction->getFunction());
+    SiteID site = entry.first.second ? layout.before.at(instruction)
+                                     : layout.after.at(instruction);
+    effectsAt[instruction->getFunction()][site] = {instruction, &entry.second};
+  }
+  auto point = [&](FlowNodeID node, const llvm::BasicBlock *block, unsigned index) {
+    if (options.locations) options.locations->nodes[node] = {block, index};
+  };
+  for (const auto &item : layouts) {
+    const auto &function = *item.first;
+    const auto &layout = item.second;
+    const Program &control = layout.function.control;
+    auto &order = functions[&function];
+    order.id = firstLayer++;
+    const std::string prefix = layout.function.name + ".temporal:event.";
+    auto addNode = [&](const std::string &label) {
+      FlowNode node;
+      node.function = order.id;
+      node.label = prefix + std::to_string(graph.nodes().size()) + ' ' + label;
+      return graph.addNode(std::move(node));
+    };
+    order.entry = addNode("temporal entry");
+    point(order.entry, &function.getEntryBlock(), 0);
+    // Unreachable blocks have no history uses in the sparse graph either.
+    llvm::SmallPtrSet<const llvm::BasicBlock *, 32> reachable;
+    llvm::SmallVector<const llvm::BasicBlock *, 32> pending{&function.getEntryBlock()};
+    reachable.insert(&function.getEntryBlock());
+    while (!pending.empty()) {
+      const auto *block = pending.pop_back_val();
+      for (const auto *successor : llvm::successors(block))
+        if (reachable.insert(successor).second) pending.push_back(successor);
+    }
+    const auto &siteEffects = effectsAt[&function];
+    for (const auto &block : function) {
+      if (!reachable.count(&block)) continue;
+      auto &blockOrder = order.blocks[&block];
+      unsigned index = 0;
+      for (const auto &instruction : block) {
+        const unsigned position = index++;
+        if (!plan.keeps(instruction)) continue;
+        // The layout's site order for one instruction: returned, before, after.
+        llvm::SmallVector<std::pair<SiteID, unsigned>, 3> sites;
+        auto after = layout.after.find(&instruction);
+        auto returned = layout.returned.find(&instruction);
+        auto before = layout.before.find(&instruction);
+        if (returned != layout.returned.end() &&
+            (after == layout.after.end() || returned->second != after->second))
+          sites.push_back({returned->second, position + 1});
+        if (before != layout.before.end()) sites.push_back({before->second, position});
+        if (after != layout.after.end()) sites.push_back({after->second, position + 1});
+        for (const auto &[site, at] : sites) {
+          const auto *call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+          if (call && returned != layout.returned.end() && site == returned->second) {
+            auto targets = callTargets(call, layouts, plan);
+            if (!targets.empty() && llvm::isa<llvm::InvokeInst>(call)) {
+              graph.addIssue("exceptional temporal call exits require edge-specific modeling");
+              targets.clear();
+            }
+            if (!targets.empty()) {
+              Stop stop;
+              const auto &label = control.operations().at(site).label;
+              stop.node = addNode(label);
+              stop.after = addNode(label);
+              point(stop.node, &block, position);
+              point(stop.after, &block, at);
+              stop.call = call;
+              stop.targets = std::move(targets);
+              order.calls.push_back(stops.size());
+              blockOrder.stops.push_back(stops.size());
+              stops.push_back(std::move(stop));
+              continue;
+            }
+          }
+          auto effect = siteEffects.find(site);
+          if (effect == siteEffects.end()) continue;
+          const auto &[source, guarded] = effect->second;
+          Stop stop;
+          stop.node = addNode(control.operations().at(site).label);
+          point(stop.node, &block, at);
+          graph.annotate(stop.node, guarded->events, guarded->objects, guarded->certainty);
+          if (auto native = provenance.find(source);
+              native != provenance.end() && native->second != NoNativeID)
+            graph.setNative(stop.node, native->second);
+          if (const auto &location = source->getDebugLoc())
+            graph.setSourceLocation(stop.node,
+                                    location->getFilename().str() + ':' +
+                                        std::to_string(location.getLine()) + ':' +
+                                        std::to_string(location.getCol()));
+          stop.objects = &guarded->objects;
+          order.events.push_back(stops.size());
+          blockOrder.stops.push_back(stops.size());
+          stops.push_back(std::move(stop));
+        }
+      }
+      if (llvm::isa<llvm::ReturnInst>(block.getTerminator())) {
+        blockOrder.exit = addNode("temporal exit");
+        point(blockOrder.exit, &block, unsigned(block.size()));
+        order.exits.push_back(blockOrder.exit);
+      }
+    }
+  }
+  // Exit events on root functions only, as in the sparse history.
+  if (plan.property.exits) {
+    std::set<const llvm::Function *> called;
+    for (const auto &stop : stops)
+      called.insert(stop.targets.begin(), stop.targets.end());
+    for (const auto &item : functions)
+      if (!called.count(item.first))
+        for (auto exit : item.second.exits) graph.annotate(exit, Event::Exit);
+  }
+  timer.finish("usetracessa_event_nodes");
+
+  std::vector<ObjectID> universe = propertyUniverse(graph, plan);
+  const unsigned width = universe.size();
+  std::unordered_map<const std::vector<ObjectID> *, llvm::BitVector> masks;
+  auto guardOf = [&](const ObjectSet &objects) {
+    Guard guard;
+    if (objects.isUnknown()) {
+      guard.top = true;
+      return guard;
+    }
+    auto cached = masks.find(&objects.objects());
+    if (cached == masks.end()) {
+      llvm::BitVector bits(width);
+      for (auto object : objects.objects()) {
+        auto it = std::lower_bound(universe.begin(), universe.end(), object);
+        if (it != universe.end() && *it == object) bits.set(it - universe.begin());
+      }
+      cached = masks.emplace(&objects.objects(), std::move(bits)).first;
+    }
+    guard.bits = cached->second;
+    return guard;
+  };
+  for (auto &item : functions)
+    for (auto index : item.second.events) stops[index].guard = guardOf(*stops[index].objects);
+  // A call stops the objects its targets concern, and every object unless
+  // calls are passed over and some target returns.
+  std::unordered_map<const llvm::CallBase *, CallSummary> summaries;
+  if (options.passCalls) summaries = summarizeCalls(layouts, plan);
+  for (auto &item : functions)
+    for (auto index : item.second.calls) {
+      auto &stop = stops[index];
+      auto summary = summaries.find(stop.call);
+      if (summary == summaries.end() || !summary->second.returns)
+        stop.guard.top = true;
+      else
+        stop.guard = guardOf(summary->second.concerned);
+    }
+  timer.finish("usetracessa_event_closures");
+
+  EventOrderStatistics statistics;
+  std::unordered_map<std::string, ObjectSet> interned;
+  auto objectsOf = [&](const llvm::BitVector &bits) {
+    if (bits.all()) return ObjectSet::unknown();
+    const auto words = bits.getData();
+    std::string key(reinterpret_cast<const char *>(words.data()),
+                    words.size() * sizeof(words[0]));
+    auto it = interned.find(key);
+    if (it == interned.end()) {
+      std::vector<ObjectID> objects;
+      for (auto bit : bits.set_bits()) objects.push_back(universe[bit]);
+      it = interned.emplace(std::move(key), ObjectSet::known(std::move(objects))).first;
+    }
+    return it->second;
+  };
+  for (const auto &item : functions) {
+    const auto &order = item.second;
+    auto search = [&](FlowNodeID origin, const llvm::BasicBlock *block,
+                      std::size_t from, llvm::BitVector mask) {
+      if (mask.none()) return;
+      ++statistics.searches;
+      std::map<FlowNodeID, llvm::BitVector> hits;
+      llvm::DenseMap<const llvm::BasicBlock *, llvm::BitVector> seen;
+      std::vector<std::pair<const llvm::BasicBlock *, llvm::BitVector>> work;
+      auto hit = [&](FlowNodeID target, const llvm::BitVector &objects) {
+        auto &bits = hits[target];
+        if (bits.size() != width) bits.resize(width);
+        bits |= objects;
+      };
+      auto scan = [&](const llvm::BasicBlock *current, std::size_t first,
+                      llvm::BitVector carried) {
+        ++statistics.blockVisits;
+        const auto &blockOrder = order.blocks.find(current)->second;
+        for (std::size_t i = first; i < blockOrder.stops.size(); ++i) {
+          const auto &stop = stops[blockOrder.stops[i]];
+          llvm::BitVector stopped = carried;
+          if (!stop.guard.top) stopped &= stop.guard.bits;
+          if (stopped.none()) continue;
+          hit(stop.node, stopped);
+          carried.reset(stopped);
+          if (carried.none()) return;
+        }
+        if (blockOrder.exit != InvalidFlowID) {
+          hit(blockOrder.exit, carried);
+          return;
+        }
+        for (const auto *successor : llvm::successors(current)) {
+          auto &visited = seen[successor];
+          if (visited.size() != width) visited.resize(width);
+          llvm::BitVector fresh = carried;
+          fresh.reset(visited);
+          if (fresh.none()) continue;
+          visited |= fresh;
+          work.emplace_back(successor, std::move(fresh));
+        }
+      };
+      scan(block, from, std::move(mask));
+      while (!work.empty()) {
+        auto [current, carried] = std::move(work.back());
+        work.pop_back();
+        scan(current, 0, std::move(carried));
+      }
+      for (const auto &[target, bits] : hits) {
+        FlowEdge edge;
+        edge.from = origin;
+        edge.to = target;
+        edge.kind = FlowKind::History;
+        edge.objects = objectsOf(bits);
+        graph.addEdge(std::move(edge));
+        ++statistics.edges;
+        statistics.edgeObjects += bits.count();
+      }
+    };
+    const auto &function = *item.first;
+    search(order.entry, &function.getEntryBlock(), 0, llvm::BitVector(width, true));
+    for (const auto &block : function) {
+      auto blockOrder = order.blocks.find(&block);
+      if (blockOrder == order.blocks.end()) continue;
+      const auto &list = blockOrder->second.stops;
+      for (std::size_t i = 0; i < list.size(); ++i) {
+        const auto &stop = stops[list[i]];
+        FlowNodeID origin = stop.call ? stop.after : stop.node;
+        llvm::BitVector mask = stop.guard.top ? llvm::BitVector(width, true) : stop.guard.bits;
+        search(origin, &block, i + 1, std::move(mask));
+      }
+    }
+  }
+  timer.finish("usetracessa_event_order");
+
+  for (const auto &stop : stops) {
+    if (!stop.call) continue;
+    const auto callSite = reinterpret_cast<std::uintptr_t>(stop.call);
+    for (const auto *target : stop.targets) {
+      const auto &callee = functions.at(target);
+      FlowEdge call;
+      call.from = stop.node; call.to = callee.entry;
+      call.kind = FlowKind::Call; call.callSite = callSite;
+      graph.addEdge(std::move(call));
+      for (auto exit : callee.exits) {
+        FlowEdge ret;
+        ret.from = exit; ret.to = stop.after;
+        ret.kind = FlowKind::Return; ret.callSite = callSite;
+        graph.addEdge(std::move(ret));
+      }
+    }
+  }
+  timer.finish("usetracessa_calls");
+  result.eventOrder = statistics;
+}
+
 } // namespace
 
 SVFGHistoryResult buildUseTraceSSAFromLotusSVFG(const analysis::SVFG &svfg,
@@ -1077,7 +1395,10 @@ SVFGHistoryResult buildUseTraceSSAFromLotusSVFG(const analysis::SVFG &svfg,
       dominators[entry.first].recalculate(*const_cast<llvm::Function *>(entry.first));
   if (mode != NativeHistoryMode::Full) {
     SVFGHistoryResult result;
-    appendTemporalFacts(result, svfg, layouts, 1, plan, options);
+    if (options.eventOrder)
+      appendEventOrderFacts(result, svfg, layouts, 1, plan, options);
+    else
+      appendTemporalFacts(result, svfg, layouts, 1, plan, options);
     for (const auto &issue : plan.issues)
       result.graph.addIssue(issue);
     if (!plan.universe.isUnknown())

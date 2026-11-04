@@ -40,6 +40,14 @@ struct NativeHistoryOptions {
   /// a temporal site and every basic block, instead of only event/call sites
   /// over contracted blocks. Guards, effects and the solver are unchanged.
   bool denseControlFlow = false;
+  /// SVFG-based baseline for property modes: no temporal history. Each event,
+  /// function entry and call return runs one object-masked search over the
+  /// LLVM CFG and links to the next event of each object it carries (an edge
+  /// guarded by those objects); calls whose callees have no event of an
+  /// object are passed over (passCalls). Sites, effects, calls and the
+  /// solver are those of the sparse history, so the per-object results
+  /// coincide.
+  bool eventOrder = false;
   /// Property modes: objects that no event of a call's targets (or of their
   /// callees) concerns pass over the call on a guarded edge, when some target
   /// returns; only the others enter the targets. Under exact call matching
