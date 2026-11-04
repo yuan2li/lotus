@@ -26,6 +26,10 @@ pointer global per slot instead; Saber (lotus-check) skips every allocation
 whose value reaches a global, as SVF's Saber does, so it reports no
 double-free or leak on those programs.
 
+Every instruction carries a !dbg location whose line is its own line in the
+.ll file (--no-debug-info drops them), so findings from all three tools can be
+aligned by file:line (compare_usetracessa.py match).
+
 Objects are grouped k per slot, and site i uses group i mod (|U| / k), so a
 group no site touches never reaches a free or dereference. --sites-per-group
 sets --sites to that multiple of the group count, which keeps every object
@@ -47,7 +51,8 @@ import sys
 
 
 def generate(sites=100, aliases=10, objects=None, noise=5, branch_every=10,
-             functions=4, free_ratio=0.5, randomize=False, seed=0, carrier="struct"):
+             functions=4, free_ratio=0.5, randomize=False, seed=0, carrier="struct",
+             debug_file=None):
     rng = random.Random(seed)
     objects = max(objects or aliases, aliases)
     groups = (objects + aliases - 1) // aliases
@@ -154,7 +159,43 @@ def generate(sites=100, aliases=10, objects=None, noise=5, branch_every=10,
     for function in range(functions):
         lines.append(f"  call void @f{function}({arguments}i32 {function + 1})")
     lines += ["  ret i32 0", "}", ""]
+    if debug_file:
+        add_debug_info(lines, debug_file)
     return "\n".join(lines)
+
+
+def add_debug_info(lines, debug_file):
+    """Give each function a subprogram and each instruction the location of
+    its own line, numbered as in the final file (metadata goes at the end)."""
+    metadata = [
+        '!0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !1, '
+        'producer: "gen_usetracessa_synthetic.py", isOptimized: false, '
+        'runtimeVersion: 0, emissionKind: LineTablesOnly)',
+        f'!1 = !DIFile(filename: "{debug_file}", directory: ".")',
+        '!2 = !{i32 7, !"Dwarf Version", i32 4}',
+        '!3 = !{i32 2, !"Debug Info Version", i32 3}',
+        '!4 = !DISubroutineType(types: !5)',
+        '!5 = !{}',
+    ]
+    next_id, scope = 6, None
+    for number, line in enumerate(lines, start=1):
+        if line.startswith("define "):
+            name = line.split("@", 1)[1].split("(", 1)[0]
+            scope, next_id = next_id, next_id + 1
+            metadata.append(f'!{scope} = distinct !DISubprogram(name: "{name}", '
+                            f'scope: !1, file: !1, line: {number}, type: !4, '
+                            f'scopeLine: {number}, spFlags: DISPFlagDefinition, '
+                            f'unit: !0)')
+            lines[number - 1] = line.replace(" {", f" !dbg !{scope} {{", 1)
+        elif line == "}":
+            scope = None
+        elif scope is not None and line.startswith("  "):
+            metadata.append(f"!{next_id} = !DILocation(line: {number}, column: 3, "
+                            f"scope: !{scope})")
+            lines[number - 1] = f"{line}, !dbg !{next_id}"
+            next_id += 1
+    lines += ["!llvm.dbg.cu = !{!0}", "!llvm.module.flags = !{!2, !3}", ""]
+    lines += metadata + [""]
 
 
 def int_list(text):
@@ -183,6 +224,8 @@ def main():
     parser.add_argument("--carrier", choices=("struct", "global"), default="struct",
                         help="Slots holding the objects: fields of a stack struct "
                              "passed to the callees (default), or pointer globals")
+    parser.add_argument("--no-debug-info", dest="debug_info", action="store_false",
+                        help="Omit the !dbg locations")
     parser.add_argument("-o", "--output", type=Path, help="Output .ll (default: stdout)")
     parser.add_argument("--sites-per-group", type=int,
                         help="Set --sites to this many sites per group of k objects, "
@@ -223,10 +266,13 @@ def main():
                     name = f"syn-s{sites}-k{aliases}{universe}-n{noise}.ll"
                     (args.out_dir / name).write_text(
                         generate(sites=sites, aliases=aliases, objects=objects,
-                                 noise=noise, **options))
+                                 noise=noise, debug_file=args.debug_info and name,
+                                 **options))
         return 0
+    debug_file = args.debug_info and (args.output.name if args.output else "synthetic.ll")
     text = generate(sites=sites_for(args.aliases, args.objects), aliases=args.aliases,
-                    objects=args.objects, noise=args.noise, **options)
+                    objects=args.objects, noise=args.noise, debug_file=debug_file,
+                    **options)
     if args.output:
         args.output.write_text(text)
     else:
