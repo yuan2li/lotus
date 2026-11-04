@@ -23,3 +23,6 @@ set_target_properties(CanaryUseTraceSSA PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(CanaryUseTraceSSASVFG STATIC SVFGBridge.cpp)
 target_link_libraries(CanaryUseTraceSSASVFG PUBLIC CanaryUseTraceSSA SVFG)
+
+add_library(CanaryUseTraceSSAPath STATIC PathFeasibility.cpp)
+target_link_libraries(CanaryUseTraceSSAPath PUBLIC CanaryUseTraceSSASVFG ${Z3_LIBRARIES})
