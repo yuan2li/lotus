@@ -228,7 +228,7 @@ def parse_ir_output(stdout, stderr):
     parsed = {"check_result": None, "findings": None,
               "finding_sites": None, "exhaustive": None}
     for line in stdout.splitlines():
-        if line.startswith(("svfg_nodes=", "product_states=")):
+        if line.startswith(("svfg_nodes=", "product_states=", "feasible_sites=")):
             for key, value in key_values(line).items():
                 if key == "context_mode":
                     parsed[key] = value
@@ -296,7 +296,7 @@ def parse_saber_output(stdout, stderr):
 
 def build_cmd(task, binaries, context_limit, budgets=None,
               context_mode="sensitive", saber_budgets=None, details=None,
-              witnesses=False):
+              witnesses=False, path_feasibility=False):
     tool, bug_type, bc_path = task["tool"], task["bug_type"], task["bc_path"]
     if tool in ("usetracessa", "ufg"):
         cmd = [str(binaries[tool]), str(bc_path), "--quiet", "--timing",
@@ -308,6 +308,8 @@ def build_cmd(task, binaries, context_limit, budgets=None,
         if tool == "usetracessa":
             cmd.append(f"--object-mode={task['object_mode']}")
             cmd.append(f"--temporal-graph={task['temporal_graph']}")
+            if path_feasibility:
+                cmd.append("--path-feasibility")
         for flag in IR_BUDGETS:
             limit = (budgets or {}).get(flag, 0)
             cmd.append(f"--{flag}={limit if limit else 'unlimited'}")
@@ -379,11 +381,12 @@ def details_name(index, task):
 
 def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
                  context_limit, budgets=None, context_mode="sensitive", saber_budgets=None,
-                 details_dir=None, witnesses=False, benchmark_info=None):
+                 details_dir=None, witnesses=False, benchmark_info=None,
+                 path_feasibility=False):
     tool, bug_type, bc_path = task["tool"], task["bug_type"], task["bc_path"]
     details = details_dir / details_name(index, task) if details_dir else None
     cmd = build_cmd(task, binaries, context_limit, budgets, context_mode,
-                    saber_budgets, details, witnesses)
+                    saber_budgets, details, witnesses, path_feasibility)
     execution = run_cmd_with_limits(cmd, timeout_s, mem_limit_gb)
     parsed = (parse_saber_output(execution["stdout"], execution["stderr"])
               if tool == "saber" else
@@ -590,6 +593,12 @@ def main():
     parser.add_argument("--svfg-mssa", choices=SVFG_MSSA_MODES, default="auto",
                         help="UseTraceSSA/UFG SVFG Memory SSA (default: auto, off for "
                              "checks; on is a sensitivity configuration)")
+    parser.add_argument("--path-feasibility", action="store_true",
+                        help="UseTraceSSA also checks the witnesses of its finding "
+                             "sites for path feasibility (RQ4): records "
+                             "feasible_sites / infeasible_sites, and the details "
+                             "JSON marks each site (and, for double-free and "
+                             "leak checks, its infeasible objects)")
     parser.add_argument("--saber-smt", action="store_true",
                         help="Also run Saber with SMT path validation for leak, "
                              "double-free, and file checks (RQ4 only)")
@@ -720,7 +729,8 @@ def main():
                             args.mem_limit_gb, binaries,
                             context_limit, budgets, context_mode, saber_budgets,
                             args.details_dir, args.witnesses,
-                            benchmark_info.get(task["bc_path"])): index
+                            benchmark_info.get(task["bc_path"]),
+                            args.path_feasibility): index
             for index, task in enumerate(tasks)
         }
         for future in concurrent.futures.as_completed(futures):
