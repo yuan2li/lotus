@@ -31,19 +31,22 @@ ObjectUniverse candidates(const TraceFlowGraph &graph) {
 } // namespace
 
 DefectReport DefectScan::materialize(std::size_t finding,
-                                     const TraceFlowGraph &graph) const {
+                                     const TraceFlowGraph &graph,
+                                     std::optional<ObjectID> object) const {
   const auto &report = findings.at(finding);
-  if (!report.result.nodes.empty())
+  if (!object || object == report.witnessObject)
+    object = report.witnessObject;
+  if (!report.result.nodes.empty() && object == report.witnessObject)
     return report;
   if (SourceGraph != &graph || graph.revision() != GraphRevision)
     throw std::invalid_argument("UseTraceSSA: deferred witness graph changed");
   QueryResult witness;
   if (Witnesses && Witnesses->hasWitnesses())
-    witness = Witnesses->witness(report.sink, *report.witnessObject);
+    witness = Witnesses->witness(report.sink, *object);
   else if (WitnessQuery) {
     Query q = *WitnessQuery;
     q.sinks = {report.sink};
-    q.memoryObject = report.witnessObject;
+    q.memoryObject = object;
     witness = QueryEngine(graph).run(q);
   } else {
     witness.status = QueryStatus::Unknown;
@@ -52,7 +55,7 @@ DefectReport DefectScan::materialize(std::size_t finding,
   }
   auto result = makeReport(graph, report.kind, std::move(witness));
   result.sink = report.sink;
-  result.witnessObject = report.witnessObject;
+  result.witnessObject = object;
   result.objects = report.objects;
   result.objectCount = report.objectCount;
   return result;
@@ -177,8 +180,8 @@ DefectScan DefectDetector::scanImpl(DefectKind kind, bool firstOnly,
             .count();
     return scan;
   }
-  if (!options.materializeWitnesses && options.retainWitnesses &&
-      !batch.hasWitnesses())
+  // Retained provenance also serves other objects at a materialized sink.
+  if (options.retainWitnesses && !batch.hasWitnesses())
     scan.WitnessQuery = q;
   std::map<ObjectID, std::vector<FlowNodeID>> witnessSinks;
   std::map<FlowNodeID, std::vector<ObjectID>> objectsAtSink;
@@ -257,7 +260,7 @@ DefectScan DefectDetector::scanImpl(DefectKind kind, bool firstOnly,
   scan.status = !scan.findings.empty() ? QueryStatus::Found :
                 scan.exhaustive ? QueryStatus::NotFound : QueryStatus::Unknown;
   scan.message = batch.message;
-  if (!options.materializeWitnesses && options.retainWitnesses)
+  if (options.retainWitnesses)
     scan.Witnesses = std::make_shared<ObjectBatchResult>(std::move(batch));
   scan.reportingMilliseconds =
       std::chrono::duration<double, std::milli>(Clock::now() - reportStarted)
@@ -328,7 +331,7 @@ void DefectDetector::scanFixedObjects(DefectKind kind, Query q, bool firstOnly,
   scan.status = !scan.findings.empty() ? QueryStatus::Found
                 : scan.exhaustive      ? QueryStatus::NotFound
                                        : QueryStatus::Unknown;
-  if (options.retainWitnesses && !options.materializeWitnesses) {
+  if (options.retainWitnesses) {
     q.scanWitnesses = true;
     scan.WitnessQuery = q;
   }
