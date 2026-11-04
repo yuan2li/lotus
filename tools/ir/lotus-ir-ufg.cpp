@@ -59,6 +59,12 @@ llvm::cl::opt<std::string> PointerAnalysis(
     llvm::cl::desc("Points-to sets of event pointers: andersen (the SVFG's) or "
                    "fspta (flow-sensitive over the same SVFG; builds Memory SSA)"),
     llvm::cl::init("andersen"));
+llvm::cl::opt<std::string> SVFGMemoryPartition(
+    "svfg-memory-partition",
+    llvm::cl::desc("Memory SSA regions: distinct (default), intra-disjoint or "
+                   "inter-disjoint (lotus-alias-fspta's default; faster for "
+                   "--pta=fspta on some programs, but coarser)"),
+    llvm::cl::init("distinct"));
 llvm::cl::opt<bool> SVFGPointerOnly(
     "svfg-pointer-only",
     llvm::cl::desc("Keep only pointer-typed SVFG value flows (default: true)"),
@@ -140,6 +146,13 @@ int main(int argc, char **argv) {
     llvm::errs() << "lotus-ir-ufg: --svfg-mssa must be auto, on, or off\n";
     return 1;
   }
+  if (SVFGMemoryPartition != "distinct" &&
+      SVFGMemoryPartition != "intra-disjoint" &&
+      SVFGMemoryPartition != "inter-disjoint") {
+    llvm::errs() << "lotus-ir-ufg: --svfg-memory-partition must be distinct, "
+                    "intra-disjoint, or inter-disjoint\n";
+    return 1;
+  }
   if (ObjectGranularity != "site" && ObjectGranularity != "abstract") {
     llvm::errs() << "lotus-ir-ufg: --object-granularity must be site or abstract\n";
     return 1;
@@ -185,6 +198,15 @@ int main(int argc, char **argv) {
     config.buildMSSA = SVFGMemorySSA == "on" || PointerAnalysis == "fspta" ||
                        (SVFGMemorySSA == "auto" && Check.empty());
     config.pointerOnly = SVFGPointerOnly;
+    // Disjoint regions merge objects that share an access, so --pta=fspta
+    // solves fewer memory versions: sphinx3 drops from 36.5M node processes
+    // to 0.47M, while milc slows down and some of its objects end Unknown.
+    config.memoryPartition =
+        SVFGMemoryPartition == "inter-disjoint"
+            ? MemoryRegionPartitionStrategy::InterDisjoint
+        : SVFGMemoryPartition == "intra-disjoint"
+            ? MemoryRegionPartitionStrategy::IntraDisjoint
+            : MemoryRegionPartitionStrategy::Distinct;
     config.resolveIndirectCalls = true;
     SVFGBuilder builder(config);
     std::unique_ptr<SVFG> svfg(builder.build(&icfg));
