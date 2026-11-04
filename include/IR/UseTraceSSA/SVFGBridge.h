@@ -15,6 +15,16 @@ namespace lotus {
 namespace usetracessa {
 
 enum class NativeHistoryMode { Full, DoubleFree, UseAfterFree, MemoryLeak, FileLeak };
+/// LLVM program point of a temporal history node: just before instruction
+/// `index` of `block`, or the block's end when `index` equals its size.
+struct NativePoint {
+  const llvm::BasicBlock *block = nullptr;
+  unsigned index = 0;
+};
+/// Program points of the temporal history nodes, for path-feasibility checks.
+struct NativeLocations {
+  std::unordered_map<FlowNodeID, NativePoint> nodes;
+};
 struct NativeHistoryOptions {
   /// False keeps opcode/site identities and debug locations without printing
   /// the whole LLVM module. Exact instruction text remains the API default.
@@ -40,6 +50,9 @@ struct NativeHistoryOptions {
   /// constant (e.g. a string literal) are dropped from event guards. Freeing
   /// such an object is a different defect. False keeps every points-to object.
   bool heapObjectsOnly = true;
+  /// When set, receives the program points of the temporal histories in
+  /// property modes, for path-feasibility checks of witnesses.
+  NativeLocations *locations = nullptr;
 };
 
 /// Construct ordered histories from this revision's SVFG and the LLVM CFG.
