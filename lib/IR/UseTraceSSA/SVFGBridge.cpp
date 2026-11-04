@@ -673,6 +673,74 @@ ResourcePlan planResources(const analysis::SVFG &svfg, const llvm::Module &modul
   return plan;
 }
 
+/// Program point of each temporal history node of one function: a node at a
+/// site denotes the state after that site (a "before I" site precedes I, an
+/// "after I" or call-return site follows it); a phi denotes its block's entry.
+void recordPoints(const TraceFlowGraph &graph, const Layout &layout,
+                  const TemporalHistory &history, NativeLocations &locations) {
+  const auto &layer = graph.layer(history.id);
+  const Graph &ssa = layer.history;
+  const Program &program = ssa.program();
+  std::unordered_map<SiteID, NativePoint> sites;
+  std::unordered_map<const llvm::Instruction *, unsigned> positions;
+  for (const auto *block : layout.nativeBlocks) {
+    unsigned index = 0;
+    for (const auto &instruction : *block) positions[&instruction] = index++;
+  }
+  auto position = [&](const llvm::Instruction *instruction) {
+    auto found = positions.find(instruction);
+    if (found != positions.end()) return found->second;
+    unsigned index = 0; // a site in a contracted block (not expected)
+    for (const auto &other : *instruction->getParent()) {
+      if (&other == instruction) break;
+      ++index;
+    }
+    return index;
+  };
+  for (const auto &entry : layout.before)
+    sites[entry.second] = {entry.first->getParent(), position(entry.first)};
+  for (const auto *map : {&layout.after, &layout.returned})
+    for (const auto &entry : *map)
+      sites[entry.second] = {entry.first->getParent(), position(entry.first) + 1};
+  std::unordered_map<SiteID, SiteID> original;
+  for (const auto &entry : history.sites) original[entry.second] = entry.first;
+  auto blockOf = [&](BlockID block) -> const llvm::BasicBlock * {
+    return block < layout.nativeBlocks.size() ? layout.nativeBlocks[block] : nullptr;
+  };
+  for (VersionID version = 0; version < ssa.nodes().size(); ++version) {
+    const auto &node = ssa.node(version);
+    if (version >= layer.versions.size() || node.region >= ssa.regions().size())
+      continue;
+    const auto &region = ssa.regions()[node.region];
+    NativePoint point;
+    if (node.site != InvalidID) {
+      auto layoutSite = original.find(node.site);
+      if (layoutSite != original.end()) {
+        auto found = sites.find(layoutSite->second);
+        if (found == sites.end()) continue;
+        point = found->second;
+      } else if (region.block != InvalidID && blockOf(region.block)) {
+        // "temporal entry" opens the entry block; "temporal exit" ends a block.
+        const auto *block = blockOf(region.block);
+        point = {block, program.operations()[node.site].label == "temporal exit"
+                            ? unsigned(block->size()) : 0u};
+      } else {
+        continue;
+      }
+    } else if (region.block != InvalidID) {
+      if (!blockOf(region.block)) continue;
+      point = {blockOf(region.block), 0};
+    } else if (region.edge != InvalidID) {
+      const auto *target = blockOf(program.edges()[region.edge].to);
+      if (!target) continue;
+      point = {target, 0};
+    } else {
+      continue;
+    }
+    locations.nodes[layer.versions[version]] = point;
+  }
+}
+
 void appendTemporalFacts(
     SVFGHistoryResult &result, const analysis::SVFG &svfg,
     const std::map<const llvm::Function *, Layout> &layouts,
@@ -728,6 +796,8 @@ void appendTemporalFacts(
       } else
         exit = history.exits.erase(exit);
     }
+    if (options.locations)
+      recordPoints(result.graph, item.second, history, *options.locations);
     histories.emplace(item.first, std::move(history));
   }
   for (const auto &effect : plan.effects) {
