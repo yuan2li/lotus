@@ -3,6 +3,8 @@
 #include "IR/UseTraceSSA/SVFGBridge.h"
 
 #include <algorithm>
+#include <map>
+#include <set>
 #include <sstream>
 
 #include <gtest/gtest.h>
@@ -46,6 +48,62 @@ void expectFixedMatchesBatch(const TraceFlowGraph &graph, DefectKind kind) {
       EXPECT_EQ(witness.result.nodes.back(), fixed.findings[i].sink);
     }
   }
+}
+
+DefectKind defectKind(NativeHistoryMode mode) {
+  return mode == NativeHistoryMode::DoubleFree   ? DefectKind::DoubleFree
+         : mode == NativeHistoryMode::UseAfterFree ? DefectKind::UseAfterFree
+         : mode == NativeHistoryMode::MemoryLeak   ? DefectKind::MemoryLeak
+                                                   : DefectKind::FileLeak;
+}
+
+// Findings by sink site (function, site text and source location), which do
+// not depend on the temporal graph's node numbering.
+std::map<std::string, std::set<ObjectID>> findingsBySite(const TraceFlowGraph &graph,
+                                                         const DefectScan &scan) {
+  std::map<std::string, std::set<ObjectID>> sites;
+  for (const auto &finding : scan.findings) {
+    const auto &node = graph.node(finding.sink);
+    auto key = node.label.substr(0, node.label.find(".temporal:")) +
+               node.label.substr(node.label.find(' ')) + '@' + node.sourceLocation;
+    sites[key].insert(finding.objects.begin(), finding.objects.end());
+  }
+  return sites;
+}
+
+// The SVFG-based baseline (event-order searches, no history) must report the
+// sparse history's per-object statuses and (site, object) findings.
+void expectEventOrderMatchesSparse(const lotus::analysis::SVFG &svfg,
+                                   const llvm::Module &module, NativeHistoryMode mode,
+                                   NativeHistoryOptions options = {}) {
+  options.eventOrder = false;
+  auto sparse = buildUseTraceSSAFromLotusSVFG(svfg, module, mode, options);
+  options.eventOrder = true;
+  auto events = buildUseTraceSSAFromLotusSVFG(svfg, module, mode, options);
+  ASSERT_TRUE(events.graph.verify());
+  ASSERT_TRUE(events.eventOrder.has_value());
+  EXPECT_FALSE(sparse.eventOrder.has_value());
+  EXPECT_EQ(events.graph.statistics().historyNodes, 0u);
+  EXPECT_EQ(events.graph.resourceCandidates(), sparse.graph.resourceCandidates());
+  auto sparseIssues = sparse.graph.issues(), eventIssues = events.graph.issues();
+  std::sort(sparseIssues.begin(), sparseIssues.end());
+  std::sort(eventIssues.begin(), eventIssues.end());
+  EXPECT_EQ(eventIssues, sparseIssues);
+  const auto kind = defectKind(mode);
+  bool searched = false;
+  for (bool fixed : {false, true}) {
+    DefectScanOptions scanOptions{true, true, false, true};
+    scanOptions.fixedObjects = fixed;
+    auto expected = DefectDetector(sparse.graph, 3).scan(kind, scanOptions);
+    auto actual = DefectDetector(events.graph, 3).scan(kind, scanOptions);
+    EXPECT_EQ(actual.status, expected.status);
+    EXPECT_EQ(actual.exhaustive, expected.exhaustive);
+    EXPECT_EQ(actual.objectStatus, expected.objectStatus);
+    EXPECT_EQ(findingsBySite(events.graph, actual),
+              findingsBySite(sparse.graph, expected));
+    searched |= actual.statistics.pushes > 0;
+  }
+  if (searched) expectFixedMatchesBatch(events.graph, kind);
 }
 
 TEST(UseTraceSSANative, LabelsPreserveUnnamedValuesAndMetadata) {
@@ -297,6 +355,7 @@ TEST(UseTraceSSANative, DenseControlFlowMatchesSparseSkeleton) {
     }
     if (mode != NativeHistoryMode::MemoryLeak) EXPECT_FALSE(actual.findings.empty());
     expectFixedMatchesBatch(dense.graph, kind);
+    expectEventOrderMatchesSparse(svfg, *module, mode);
   }
 }
 
@@ -349,6 +408,7 @@ TEST(UseTraceSSANative, ResolvedIndirectCallsJoinTheHistory) {
   ASSERT_EQ(after.findings.size(), 1u);
   EXPECT_EQ(after.findings[0].objects, std::vector<ObjectID>({10}));
   expectFixedMatchesBatch(resolved.graph, DefectKind::UseAfterFree);
+  expectEventOrderMatchesSparse(svfg, *module, NativeHistoryMode::UseAfterFree);
 }
 
 TEST(UseTraceSSANative, PointsToSourceReplacesSVFGSets) {
@@ -480,6 +540,9 @@ TEST(UseTraceSSANative, ReallocReleasesItsArgumentThenAllocates) {
   for (const auto &finding : stale.findings)
     EXPECT_EQ(finding.objects, std::vector<ObjectID>({10}));
   expectFixedMatchesBatch(useAfterFree.graph, DefectKind::UseAfterFree);
+  for (auto mode : {NativeHistoryMode::DoubleFree, NativeHistoryMode::UseAfterFree,
+                    NativeHistoryMode::MemoryLeak})
+    expectEventOrderMatchesSparse(svfg, *module, mode);
 }
 
 TEST(UseTraceSSANative, CxxNewAndDeleteAreHeapEvents) {
@@ -523,6 +586,9 @@ TEST(UseTraceSSANative, CxxNewAndDeleteAreHeapEvents) {
   auto leaks = DefectDetector(leak.graph, 3).scan(DefectKind::MemoryLeak);
   for (const auto &finding : leaks.findings)
     EXPECT_EQ(std::count(finding.objects.begin(), finding.objects.end(), ObjectID(20)), 0);
+  for (auto mode : {NativeHistoryMode::DoubleFree, NativeHistoryMode::UseAfterFree,
+                    NativeHistoryMode::MemoryLeak})
+    expectEventOrderMatchesSparse(svfg, *module, mode);
 }
 
 TEST(UseTraceSSANative, AllocationSiteGranularityMergesAbstractCopies) {
@@ -655,6 +721,8 @@ TEST(UseTraceSSANative, MultipleCallersCannotExchangeReturns) {
   auto passing=buildUseTraceSSAFromLotusSVFG(svfg,*m,NativeHistoryMode::UseAfterFree);
   auto p=queries::useAfterFree(passing.graph); p.context=ContextMode::Insensitive;
   EXPECT_FALSE(QueryEngine(passing.graph).runObjects({p,ObjectUniverse({42})}).found.any());
+  expectEventOrderMatchesSparse(svfg, *m, NativeHistoryMode::UseAfterFree, entering);
+  expectEventOrderMatchesSparse(svfg, *m, NativeHistoryMode::UseAfterFree);
 }
 TEST(UseTraceSSANative, NoReturnAndRecursion) {
   llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
@@ -697,6 +765,7 @@ TEST(UseTraceSSANative, NoReturnAndRecursion) {
       EXPECT_EQ(batch.status(object),QueryEngine(r.graph).run(q).status);
     }
   }
+  expectEventOrderMatchesSparse(svfg, *m, NativeHistoryMode::UseAfterFree);
 }
 TEST(UseTraceSSANative, ContractsEmptyChainsAndRetainsDeadCycles) {
   std::ostringstream text;
@@ -765,6 +834,113 @@ TEST(UseTraceSSANative, CompactLabelsAndSparseProvenancePreserveEffects) {
             std::string::npos);
 }
 
+TEST(UseTraceSSANative, EventOrderMatchesSparseOnAliasedBranchesLoopsAndCalls) {
+  llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
+  auto module = llvm::parseAssemblyString(R"IR(
+    declare i8* @malloc(i64)
+    declare void @free(i8*)
+    define void @release(i8* %p) {
+      call void @free(i8* %p)
+      ret void
+    }
+    define void @idle(i32 %n) {
+      ret void
+    }
+    define void @flow(i1 %c, i32 %n) {
+    entry:
+      %a = call i8* @malloc(i64 8)
+      %b = call i8* @malloc(i64 8)
+      %alias = select i1 %c, i8* %a, i8* %b
+      br i1 %c, label %left, label %right
+    left:
+      call void @free(i8* %a)
+      br label %join
+    right:
+      call void @release(i8* %alias)
+      br label %join
+    join:
+      call void @idle(i32 %n)
+      %v = load i8, i8* %alias
+      br label %loop
+    loop:
+      %i = phi i32 [ 0, %join ], [ %next, %loop ]
+      call void @free(i8* %b)
+      %next = add i32 %i, 1
+      %more = icmp ne i32 %next, %n
+      br i1 %more, label %loop, label %done
+    done:
+      ret void
+    dead:
+      call void @free(i8* %a)
+      ret void
+    }
+  )IR", diagnostic, context);
+  ASSERT_TRUE(module);
+  auto &function = *module->getFunction("flow");
+  lotus::analysis::SVFG svfg;
+  for (ObjectID object : {10, 11}) {
+    svfg.addObjectForValue(module->getFunction("release")->getArg(0), object);
+    svfg.addObjectForValue(&*std::find_if(llvm::inst_begin(function), llvm::inst_end(function),
+                                          [](const llvm::Instruction &i) {
+                                            return i.getName() == "alias";
+                                          }),
+                           object);
+  }
+  for (const auto &instruction : llvm::instructions(function)) {
+    if (instruction.getName() == "a") svfg.addObjectForValue(&instruction, 10);
+    if (instruction.getName() == "b") svfg.addObjectForValue(&instruction, 11);
+  }
+  for (auto mode : {NativeHistoryMode::DoubleFree, NativeHistoryMode::UseAfterFree,
+                    NativeHistoryMode::MemoryLeak}) {
+    SCOPED_TRACE(static_cast<int>(mode));
+    expectEventOrderMatchesSparse(svfg, *module, mode);
+    NativeHistoryOptions options;
+    options.eventOrder = true;
+    auto events = buildUseTraceSSAFromLotusSVFG(svfg, *module, mode, options);
+    EXPECT_GT(events.eventOrder->searches, 0u);
+    EXPECT_GT(events.eventOrder->edges, 0u);
+    auto scan = DefectDetector(events.graph, 3).scan(defectKind(mode));
+    if (mode != NativeHistoryMode::MemoryLeak) EXPECT_FALSE(scan.findings.empty());
+    // @idle has no event (a callee's return is no program exit): every
+    // property passes over it.
+    bool reachesIdle = false;
+    for (const auto &node : events.graph.nodes())
+      if (node.label.find("@idle") != std::string::npos)
+        for (auto edge : events.graph.incoming(node.id))
+          reachesIdle |= events.graph.edge(edge).kind == FlowKind::History;
+    EXPECT_FALSE(reachesIdle);
+    // The sparse history passes both objects over @idle on a guarded edge
+    // and sends none of them into it.
+    auto sparse = buildUseTraceSSAFromLotusSVFG(svfg, *module, mode);
+    bool bypass = false, entry = false;
+    for (const auto &edge : sparse.graph.edges()) {
+      if (!edge.enabled) continue;
+      if (edge.kind == FlowKind::History && !edge.objects.isUnknown() &&
+          sparse.graph.node(edge.to).label.find("@idle") != std::string::npos)
+        bypass |= edge.objects.objects() == std::vector<ObjectID>({10, 11});
+      if (edge.kind == FlowKind::Call &&
+          sparse.graph.node(edge.to).label.rfind("idle.", 0) == 0) {
+        entry = true;
+        EXPECT_TRUE(edge.objects.empty());
+      }
+    }
+    EXPECT_TRUE(bypass);
+    EXPECT_TRUE(entry);
+    options.passCalls = false;
+    auto entering = buildUseTraceSSAFromLotusSVFG(svfg, *module, mode, options);
+    bool entersIdle = false;
+    for (const auto &node : entering.graph.nodes())
+      if (node.label.find("@idle") != std::string::npos)
+        for (auto edge : entering.graph.incoming(node.id))
+          entersIdle |= entering.graph.edge(edge).kind == FlowKind::History;
+    EXPECT_TRUE(entersIdle);
+    expectEventOrderMatchesSparse(svfg, *module, mode, options);
+    // The dead block contributes no node.
+    for (const auto &node : events.graph.nodes())
+      EXPECT_EQ(node.label.find("dead"), std::string::npos);
+  }
+}
+
 TEST(UseTraceSSANative, CalleeReturnsAreNotProgramExits) {
   llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
   auto module = llvm::parseAssemblyString(R"IR(
@@ -792,20 +968,25 @@ TEST(UseTraceSSANative, CalleeReturnsAreNotProgramExits) {
       if (instruction.getName() == "kept") svfg.addObjectForValue(&instruction, 10);
       if (instruction.getName() == "lost") svfg.addObjectForValue(&instruction, 11);
     }
-  auto result = buildUseTraceSSAFromLotusSVFG(svfg, *module, NativeHistoryMode::MemoryLeak);
-  // Only @main's return is a program exit.
-  auto exits = result.graph.select(Event::Exit);
-  ASSERT_EQ(exits.size(), 1u);
-  EXPECT_EQ(result.graph.node(exits[0]).label.rfind("main.", 0), 0u);
-  // %kept passes @idle and @inner before it is freed: no leak (Unknown, not
-  // NotFound, since external malloc/free leave the model incomplete). %lost
-  // leaks at the program exit, after @inner returns.
-  auto scan = DefectDetector(result.graph, 3).scan(DefectKind::MemoryLeak);
-  EXPECT_NE(scan.objectStatus.at(10), QueryStatus::Found);
-  EXPECT_EQ(scan.objectStatus.at(11), QueryStatus::Found);
-  ASSERT_EQ(scan.findings.size(), 1u);
-  EXPECT_EQ(scan.findings[0].objects, std::vector<ObjectID>({11}));
-  expectFixedMatchesBatch(result.graph, DefectKind::MemoryLeak);
+  for (bool eventOrder : {false, true}) {
+    NativeHistoryOptions options;
+    options.eventOrder = eventOrder;
+    auto result = buildUseTraceSSAFromLotusSVFG(svfg, *module,
+                                                NativeHistoryMode::MemoryLeak, options);
+    // Only @main's return is a program exit.
+    auto exits = result.graph.select(Event::Exit);
+    ASSERT_EQ(exits.size(), 1u);
+    EXPECT_EQ(result.graph.node(exits[0]).label.rfind("main.", 0), 0u);
+    // %kept passes @idle and @inner before it is freed: no leak (Unknown,
+    // not NotFound, since external malloc/free leave the model incomplete).
+    // %lost leaks at the program exit, after @inner returns.
+    auto scan = DefectDetector(result.graph, 3).scan(DefectKind::MemoryLeak);
+    EXPECT_NE(scan.objectStatus.at(10), QueryStatus::Found);
+    EXPECT_EQ(scan.objectStatus.at(11), QueryStatus::Found);
+    ASSERT_EQ(scan.findings.size(), 1u);
+    EXPECT_EQ(scan.findings[0].objects, std::vector<ObjectID>({11}));
+  }
+  expectEventOrderMatchesSparse(svfg, *module, NativeHistoryMode::MemoryLeak);
 }
 
 TEST(UseTraceSSANative, UnreachableIsNotANormalLeakExit) {
@@ -826,5 +1007,6 @@ TEST(UseTraceSSANative, UnreachableIsNotANormalLeakExit) {
   EXPECT_TRUE(result.graph.select(Event::Exit).empty());
   EXPECT_EQ(DefectDetector(result.graph).scan(DefectKind::MemoryLeak).status,
             QueryStatus::Unknown);
+  expectEventOrderMatchesSparse(svfg, *module, NativeHistoryMode::MemoryLeak);
 }
 } // namespace

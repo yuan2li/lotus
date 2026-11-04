@@ -3,6 +3,8 @@
 
 #include "IR/UseTraceSSA/TraceFlowGraph.h"
 
+#include <optional>
+
 namespace lotus {
 namespace usetracessa {
 
@@ -102,8 +104,15 @@ struct SVFGConstructionInput {
   std::vector<LocatedSVFGEdge> edges;
   std::vector<std::string> issues;
 };
+/// Work of the SVFG-based baseline (NativeHistoryOptions::eventOrder): the
+/// per-exit CFG searches that recover the next events of each object.
+struct EventOrderStatistics {
+  std::size_t searches = 0, blockVisits = 0, edges = 0, edgeObjects = 0;
+};
 struct SVFGHistoryResult {
   TraceFlowGraph graph;
+  /// Set when the temporal edges come from event-order searches.
+  std::optional<EventOrderStatistics> eventOrder;
   SVFGImportResult native;
   std::map<NativeID, ValueID> channels;
   std::map<FunctionID, std::map<SiteID, SiteID>> sites;
