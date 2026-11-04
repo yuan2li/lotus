@@ -296,7 +296,7 @@ def parse_saber_output(stdout, stderr):
 
 def build_cmd(task, binaries, context_limit, budgets=None,
               context_mode="sensitive", saber_budgets=None, details=None,
-              witnesses=False, path_feasibility=False, pass_calls=True):
+              witnesses=False, path_feasibility=False):
     tool, bug_type, bc_path = task["tool"], task["bug_type"], task["bc_path"]
     if tool in ("usetracessa", "ufg"):
         cmd = [str(binaries[tool]), str(bc_path), "--quiet", "--timing",
@@ -305,7 +305,7 @@ def build_cmd(task, binaries, context_limit, budgets=None,
                f"--object-granularity={task['object_granularity']}",
                f"--svfg-mssa={task['svfg_mssa']}", f"--pta={task['pta']}",
                f"--heap-objects-only={'true' if task['object_scope'] == 'heap' else 'false'}",
-               f"--pass-calls={'true' if pass_calls else 'false'}"]
+               f"--pass-calls={'true' if task['pass_calls'] else 'false'}"]
         if tool == "usetracessa":
             cmd.append(f"--object-mode={task['object_mode']}")
             cmd.append(f"--temporal-graph={task['temporal_graph']}")
@@ -333,7 +333,7 @@ def build_cmd(task, binaries, context_limit, budgets=None,
 def make_tasks(benchmarks, tools, checks, object_modes=("batch",),
                granularities=("site",), svfg_mssa="auto", saber_smt=False,
                temporal_graphs=("sparse",), repeat=1, ptas=("andersen",),
-               object_scopes=("heap",)):
+               object_scopes=("heap",), pass_calls=(True,)):
     """Expand tools into configurations; options that do not apply stay None.
     Repeats are the outer loop so that runs of one configuration are spread
     over the whole experiment."""
@@ -349,14 +349,16 @@ def make_tasks(benchmarks, tools, checks, object_modes=("batch",),
                         for scope in object_scopes:
                             for object_mode in (object_modes if utssa else (None,)):
                                 for temporal_graph in (temporal_graphs if utssa else (None,)):
-                                    tasks.append({
-                                        "tool": tool, "bug_type": bug_type,
-                                        "bc_path": bc_path, "smt_mode": "nosmt",
-                                        "object_mode": object_mode,
-                                        "temporal_graph": temporal_graph,
-                                        "object_granularity": granularity,
-                                        "svfg_mssa": svfg_mssa, "pta": pta,
-                                        "object_scope": scope})
+                                    for passing in pass_calls:
+                                        tasks.append({
+                                            "tool": tool, "bug_type": bug_type,
+                                            "bc_path": bc_path, "smt_mode": "nosmt",
+                                            "object_mode": object_mode,
+                                            "temporal_graph": temporal_graph,
+                                            "object_granularity": granularity,
+                                            "svfg_mssa": svfg_mssa, "pta": pta,
+                                            "object_scope": scope,
+                                            "pass_calls": passing})
             if bug_type in SABER_CHECKS and "saber" in tools:
                 smt_modes = ("nosmt", "smt") if (
                     saber_smt and bug_type in SABER_SMT_CHECKS) else ("nosmt",)
@@ -365,7 +367,8 @@ def make_tasks(benchmarks, tools, checks, object_modes=("batch",),
                         "tool": "saber", "bug_type": bug_type, "bc_path": bc_path,
                         "smt_mode": smt_mode, "object_mode": None,
                         "temporal_graph": None, "object_granularity": None,
-                        "svfg_mssa": None, "pta": None, "object_scope": None})
+                        "svfg_mssa": None, "pta": None, "object_scope": None,
+                        "pass_calls": None})
     return [dict(task, repeat=run) for run in range(repeat) for task in tasks]
 
 
@@ -377,18 +380,19 @@ def details_name(index, task):
         parts.append(task["pta"])
     if task.get("object_scope") not in (None, "heap"):
         parts.append(task["object_scope"] + "-objects")
+    if task.get("pass_calls") is False:
+        parts.append("enter-calls")
     return "-".join(parts) + f"-r{task['repeat']}.json"
 
 
 def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
                  context_limit, budgets=None, context_mode="sensitive", saber_budgets=None,
                  details_dir=None, witnesses=False, benchmark_info=None,
-                 path_feasibility=False, pass_calls=True):
+                 path_feasibility=False):
     tool, bug_type, bc_path = task["tool"], task["bug_type"], task["bc_path"]
     details = details_dir / details_name(index, task) if details_dir else None
     cmd = build_cmd(task, binaries, context_limit, budgets, context_mode,
-                    saber_budgets, details, witnesses, path_feasibility,
-                    pass_calls)
+                    saber_budgets, details, witnesses, path_feasibility)
     execution = run_cmd_with_limits(cmd, timeout_s, mem_limit_gb)
     parsed = (parse_saber_output(execution["stdout"], execution["stderr"])
               if tool == "saber" else
@@ -413,6 +417,7 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
         "svfg_mssa": task["svfg_mssa"],
         "pta": task["pta"],
         "object_scope": task["object_scope"],
+        "pass_calls": task["pass_calls"],
         "bc": bc_path.name, "bc_path": str(bc_path),
         "analysis_scope": ("context-bounded-icfg-candidate"
                            if tool == "saber" and bug_type == "use-after-free"
@@ -603,10 +608,11 @@ def main():
                              "feasible_sites / infeasible_sites, and the details "
                              "JSON marks each site (and, for double-free and "
                              "leak checks, its infeasible objects)")
-    parser.add_argument("--pass-calls", choices=("true", "false"), default="true",
+    parser.add_argument("--pass-calls", type=choice_list(("true", "false")),
+                        default=("true",),
                         help="UseTraceSSA/UFG: objects that no event of a call's "
-                             "targets concerns pass over the call (default), or "
-                             "false to send every object through every callee")
+                             "targets concerns pass over the call (true, default), "
+                             "every object enters every callee (false), or both")
     parser.add_argument("--saber-smt", action="store_true",
                         help="Also run Saber with SMT path validation for leak, "
                              "double-free, and file checks (RQ4 only)")
@@ -702,7 +708,8 @@ def main():
 
     tasks = make_tasks(benchmarks, tools, args.checks, args.object_modes,
                        args.object_granularities, args.svfg_mssa, args.saber_smt,
-                       args.temporal_graphs, args.repeat, args.ptas, args.object_scopes)
+                       args.temporal_graphs, args.repeat, args.ptas, args.object_scopes,
+                       tuple(value == "true" for value in args.pass_calls))
     records = [None] * len(tasks)
     if args.details_dir:
         args.details_dir = args.details_dir.resolve()
@@ -711,8 +718,7 @@ def main():
         "timeout_s": args.timeout, "mem_limit_gb": args.mem_limit_gb,
         "max_workers": args.max_workers, "context": context_mode,
         "context_limit": context_limit, "ir_budgets": budgets,
-        "saber_budgets": saber_budgets,
-        "pass_calls": args.pass_calls == "true"})
+        "saber_budgets": saber_budgets})
     print(f"Benchmarks: {len(benchmarks)}  Tools: {','.join(tools)}")
     print(f"Tasks: {len(tasks)}  Workers: {args.max_workers}  Repeat: {args.repeat}"
           f"{'  Preset: ' + args.preset if args.preset else ''}")
@@ -720,6 +726,7 @@ def main():
           f"Temporal graphs: {','.join(args.temporal_graphs)}  "
           f"Granularities: {','.join(args.object_granularities)}  "
           f"PTA: {','.join(args.ptas)}  Object scopes: {','.join(args.object_scopes)}  "
+          f"Pass calls: {','.join(args.pass_calls)}  "
           f"SVFG MSSA: {args.svfg_mssa}  Saber SMT: {'yes' if args.saber_smt else 'no'}")
     print(f"Timeout: {args.timeout:g}s  RSS limit: {args.mem_limit_gb:g} GiB")
     print(f"Context: {context_mode}; context limit: "
@@ -739,8 +746,7 @@ def main():
                             context_limit, budgets, context_mode, saber_budgets,
                             args.details_dir, args.witnesses,
                             benchmark_info.get(task["bc_path"]),
-                            args.path_feasibility,
-                            args.pass_calls == "true"): index
+                            args.path_feasibility): index
             for index, task in enumerate(tasks)
         }
         for future in concurrent.futures.as_completed(futures):
@@ -755,7 +761,8 @@ def main():
                 f"{record['temporal_graph'] or '-'}/"
                 f"{record['object_granularity'] or '-':8s}"
                 f"{'/' + record['pta'] if record.get('pta') not in (None, 'andersen') else ''}"
-                f"{'/all-objects' if record.get('object_scope') == 'all' else ''} "
+                f"{'/all-objects' if record.get('object_scope') == 'all' else ''}"
+                f"{'/enter-calls' if record.get('pass_calls') is False else ''} "
                 f"total={record.get('total_ms')}ms "
                 f"rss={record['max_rss_mb']:8.1f}MiB "
                 f"result={record.get('check_result') or '-':8s} "

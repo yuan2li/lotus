@@ -36,7 +36,8 @@ import statistics
 import sys
 
 CONFIG_KEYS = ("benchmark", "tool", "bug_type", "smt_mode", "object_mode",
-               "temporal_graph", "object_granularity", "svfg_mssa", "pta", "object_scope")
+               "temporal_graph", "object_granularity", "svfg_mssa", "pta", "object_scope",
+               "pass_calls")
 METRICS = ("analysis_ms", "total_ms", "check_ms", "build_ms", "parse_ms", "svfg_ms", "pta_ms",
            "max_rss_mb", "wall_time_s", "findings", "finding_sites",
            "product_states", "product_edges", "summary_pairs", "pushes",
@@ -113,6 +114,9 @@ def find(rows, benchmark, bug_type, tool, **config):
                 continue
             if tool != "saber" and row.get("object_scope") not in (
                     None, config.get("object_scope", "heap")):
+                continue
+            if tool != "saber" and row.get("pass_calls") not in (
+                    None, config.get("pass_calls", True)):
                 continue
             return row
     return None
