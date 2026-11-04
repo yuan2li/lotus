@@ -40,6 +40,13 @@ struct NativeHistoryOptions {
   /// a temporal site and every basic block, instead of only event/call sites
   /// over contracted blocks. Guards, effects and the solver are unchanged.
   bool denseControlFlow = false;
+  /// Property modes: objects that no event of a call's targets (or of their
+  /// callees) concerns pass over the call on a guarded edge, when some target
+  /// returns; only the others enter the targets. Under exact call matching
+  /// this does not change results. Under a context bound or without context,
+  /// objects that would enter a callee pick up returns of truncated contexts,
+  /// so passing over is more precise. False sends every object through.
+  bool passCalls = true;
   /// Points-to source for event pointers in place of the SVFG's own
   /// (Andersen) sets, e.g. a flow-sensitive analysis over the same SVFG and
   /// object IDs. nullopt falls back to the SVFG for that pointer. Call edges

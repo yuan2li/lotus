@@ -87,6 +87,12 @@ llvm::cl::opt<std::string> TemporalGraph(
     llvm::cl::desc("--check temporal graph: sparse (event/call skeleton) or "
                    "icfg (every instruction; the IDE-ICFG baseline)"),
     llvm::cl::init("sparse"));
+llvm::cl::opt<bool> PassCalls(
+    "pass-calls",
+    llvm::cl::desc("--check: objects that no event of a call's targets concerns "
+                   "pass over the call (default); false sends every object "
+                   "through every callee"),
+    llvm::cl::init(true));
 llvm::cl::opt<bool> PathFeasibilityCheck(
     "path-feasibility",
     llvm::cl::desc("--check: test the witnesses of every finding site for path "
@@ -261,6 +267,7 @@ int main(int argc, char **argv) {
     historyOptions.heapObjectsOnly = HeapObjectsOnly;
     if (flowSensitive) historyOptions.pointsTo = std::cref(*flowSensitive);
     historyOptions.denseControlFlow = TemporalGraph == "icfg";
+    historyOptions.passCalls = PassCalls;
     NativeLocations locations;
     if (PathFeasibilityCheck) historyOptions.locations = &locations;
     if (Timing)
