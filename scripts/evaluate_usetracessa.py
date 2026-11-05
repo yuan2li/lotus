@@ -9,7 +9,8 @@ Every tool reports split timings: parse, SVFG construction, and analysis
 (`analysis_ms` = total - parse - SVFG). Runs are serial by default so wall time
 and peak RSS are easier to compare; --max-workers enables throughput-oriented
 parallel runs. Tools run with the Lotus root as working directory so that
-config/*.spec are found.
+config/*.spec are found; a run that cannot read one of them is retried, and
+recorded as SPEC_ERROR when every attempt fails (`attempts` in each record).
 
 Tables should use the tools' own `total_ms` / `analysis_ms`; `wall_time_s` is
 kept for timeouts. `--repeat N` runs every configuration N times (summarize
@@ -75,6 +76,11 @@ KEY_VALUE = re.compile(r"([a-z][a-z0-9_]*)=([^\s]+)")
 IR_BUDGETS = ("max-product-states", "max-summary-pairs")
 # Power-of-two buckets: entry b counts values v with 2^b <= v < 2^(b+1).
 HISTOGRAMS = ("push_sizes", "guard_k_hist")
+# The tools warn and go on without a library spec file (config/*.spec) they
+# cannot read, which silently drops models such as realloc's allocation and
+# copy; seen as a transient read failure on a cloud-synced checkout.
+SPEC_LOAD_FAILURE = "Failed to open spec file"
+SPEC_ATTEMPTS = 3
 
 
 def budget_value(text):
@@ -393,7 +399,10 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
     details = details_dir / details_name(index, task) if details_dir else None
     cmd = build_cmd(task, binaries, context_limit, budgets, context_mode,
                     saber_budgets, details, witnesses, path_feasibility)
-    execution = run_cmd_with_limits(cmd, timeout_s, mem_limit_gb)
+    for attempt in range(1, SPEC_ATTEMPTS + 1):
+        execution = run_cmd_with_limits(cmd, timeout_s, mem_limit_gb)
+        if SPEC_LOAD_FAILURE not in execution["stderr"]:
+            break
     parsed = (parse_saber_output(execution["stdout"], execution["stderr"])
               if tool == "saber" else
               parse_ir_output(execution["stdout"], execution["stderr"]))
@@ -407,6 +416,8 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
         )
         if any(parsed.get(field) is None for field in required):
             status = "PARSE_ERROR"
+    if SPEC_LOAD_FAILURE in execution["stderr"]:
+        status = "SPEC_ERROR"
     record = {
         "task_id": index, "repeat": task["repeat"], "tool": tool, "bug_type": bug_type,
         **(benchmark_info or {}),
@@ -418,6 +429,7 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
         "pta": task["pta"],
         "object_scope": task["object_scope"],
         "pass_calls": task["pass_calls"],
+        "attempts": attempt,
         "bc": bc_path.name, "bc_path": str(bc_path),
         "analysis_scope": ("context-bounded-icfg-candidate"
                            if tool == "saber" and bug_type == "use-after-free"
