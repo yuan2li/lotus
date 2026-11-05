@@ -44,10 +44,18 @@ METRICS = ("analysis_ms", "total_ms", "check_ms", "build_ms", "parse_ms", "svfg_
            "pushed_object_bits", "sigma", "candidate_objects", "found_objects",
            "history_nodes", "history_psi", "history_phi", "ufg_nodes",
            "excluded_nonheap_objects", "guard_k_count", "guard_k_mean", "guard_k_median", "guard_k_p90", "guard_k_max",
-           "icfg_nodes", "ir_instructions", "ir_blocks", "ir_functions")
+           "icfg_nodes", "ir_instructions", "ir_blocks", "ir_functions",
+           # Temporal graph size (every graph) and the event-order searches of
+           # the SVFG-based baseline (--temporal-graph=svfg).
+           "flow_nodes", "flow_edges", "ordering_searches", "ordering_block_visits",
+           "ordering_edges", "ordering_edge_objects", "usetracessa_event_order_ms",
+           # Path feasibility of the reported witnesses (--path-feasibility, RQ4).
+           "feasible_sites", "infeasible_sites", "feasibility_unknown_sites",
+           "feasibility_witnesses", "infeasible_witnesses", "feasibility_ms")
 HISTOGRAMS = ("push_sizes", "guard_k_hist")
 FRACTIONAL = ("sigma", "guard_k_mean", "max_rss_mb")
-LABELS = {"TIMEOUT": "TO", "OOM": "OOM", "INCOMPLETE": "INC", "PARSE_ERROR": "PE"}
+LABELS = {"TIMEOUT": "TO", "OOM": "OOM", "INCOMPLETE": "INC", "PARSE_ERROR": "PE",
+          "SPEC_ERROR": "SPEC"}
 CLIENTS = {"double-free": "DF", "use-after-free": "UAF",
            "memory-leak": "Leak (heap)", "file-leak": "Leak (file)"}
 
@@ -83,6 +91,9 @@ def aggregate(records):
         row["status"] = label(failed[0]) if failed else "OK"
         row["check_result"] = runs[0].get("check_result")
         row["unknown_incomplete_model"] = any(run.get("unknown_incomplete_model") for run in runs)
+        # Runs retried after a spec file could not be read (records from
+        # before the retry have no such field).
+        row["max_attempts"] = max((run.get("attempts", 1) for run in runs), default=1)
         ok = [run for run in runs if run["status"] == "SUCCESS"]
         for metric in METRICS:
             values = [run[metric] for run in ok
@@ -166,7 +177,7 @@ def main():
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     header = list(CONFIG_KEYS) + ["kloc", "debug_lines", "runs", "status", "check_result",
-                                  "unknown_incomplete_model"] + list(METRICS) + list(HISTOGRAMS)
+                                  "unknown_incomplete_model", "max_attempts"] + list(METRICS) + list(HISTOGRAMS)
     write_csv(args.out_dir / "runs.csv", header,
               [[row.get(name) for name in header] for row in
                sorted(rows.values(), key=lambda r: tuple(str(r.get(k)) for k in CONFIG_KEYS))])
