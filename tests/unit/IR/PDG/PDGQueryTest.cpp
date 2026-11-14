@@ -5,14 +5,18 @@
 
 #include "TestUtils/LLVMHelpers.h"
 
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/InitializePasses.h"
 #include "llvm/PassRegistry.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/FileUtilities.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Program.h"
 #include "llvm/Support/SourceMgr.h"
 
-#include <array>
-#include <cstdio>
 #include <memory>
 #include <set>
 #include <string>
@@ -82,20 +86,33 @@ protected:
     return llvm_context;
   }
 
-  std::string runCommand(const std::string &command) {
-    std::array<char, 256> buffer;
-    std::string output;
-    FILE *pipe = popen(command.c_str(), "r");
-    if (pipe == nullptr)
-      return output;
-    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr)
-      output += buffer.data();
-    pclose(pipe);
-    return output;
+  std::string runCommand(ArrayRef<StringRef> arguments) {
+    SmallString<128> output_path;
+    auto error = sys::fs::createTemporaryFile("lotus-pdg-query-test", "txt", output_path);
+    if (error) {
+      ADD_FAILURE() << "Could not create CLI output file: " << error.message();
+      return "";
+    }
+    FileRemover cleanup(output_path);
+    Optional<StringRef> redirects[] = {None, output_path.str(), output_path.str()};
+    std::string execution_error;
+    // Pass arguments directly so build/fixture paths containing spaces work.
+    int exit_code = sys::ExecuteAndWait(arguments.front(), arguments, None,
+                                       redirects, 30, 0, &execution_error);
+    auto output = MemoryBuffer::getFile(output_path);
+    if (!output) {
+      ADD_FAILURE() << "Could not read CLI output: " << output.getError().message();
+      return "";
+    }
+    const std::string text = output.get()->getBuffer().str();
+    EXPECT_EQ(exit_code, 0) << execution_error << '\n' << text;
+    return text;
   }
 
   std::string benchmarkPath() {
     std::vector<std::string> search_paths;
+    search_paths.push_back(LOTUS_TEST_SOURCE_DIR
+                           "/benchmarks/real-world/SPEC2006/998.specrand.bc");
     search_paths.push_back("../benchmarks/real-world/SPEC2006/998.specrand.bc");
     search_paths.push_back("benchmarks/real-world/SPEC2006/998.specrand.bc");
 
@@ -1065,33 +1082,36 @@ TEST_F(PDGQueryTest, ResourceFlowQueryFindsLeakAndDoubleRelease) {
 }
 
 TEST_F(PDGQueryTest, PdgQueryCliSmokeCoversNewAnalyses) {
+#ifndef LOTUS_PDG_QUERY_TOOL_PATH
+  GTEST_SKIP() << "lotus-ir-pdg-query was not selected in this build";
+#else
   const std::string benchmark = benchmarkPath();
   if (benchmark.empty()) {
     GTEST_SKIP() << "benchmark bitcode not available";
     return;
   }
 
-  const std::string binary =
-      "/Users/rainoftime/Work/analysis/lotus/build/bin/lotus-ir-pdg-query";
+  const std::string binary = LOTUS_PDG_QUERY_TOOL_PATH;
+  ASSERT_TRUE(sys::fs::can_execute(binary)) << "PDG CLI is not executable: " << binary;
   {
     const std::string output = runCommand(
-        binary + " " + benchmark +
-        " --analysis summary --scope-function main --format json 2>&1");
+        {binary, benchmark, "--analysis", "summary", "--scope-function", "main",
+         "--format", "json"});
     EXPECT_NE(output.find("\"function\""), std::string::npos);
   }
   {
     const std::string output = runCommand(
-        binary + " " + benchmark +
-        " --analysis impact --criteria-query \"MATCH (n:INST_RET) RETURN n\" "
-        "--baseline-query \"MATCH (n:INST_BR) RETURN n\" --format json 2>&1");
+        {binary, benchmark, "--analysis", "impact", "--criteria-query",
+         "MATCH (n:INST_RET) RETURN n", "--baseline-query",
+         "MATCH (n:INST_BR) RETURN n", "--format", "json"});
     EXPECT_NE(output.find("\"ranked_impacts\""), std::string::npos);
   }
   {
     const std::string output = runCommand(
-        binary + " " + benchmark +
-        " --analysis resource-flow --format json 2>&1");
+        {binary, benchmark, "--analysis", "resource-flow", "--format", "json"});
     EXPECT_NE(output.find("\"resource_kind_counts\""), std::string::npos);
   }
+#endif
 }
 
 TEST_F(PDGQueryTest, BenchmarkBackedSmokeUsesNewSliceQueryWhenAvailable) {

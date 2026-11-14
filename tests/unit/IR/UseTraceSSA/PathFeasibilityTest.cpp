@@ -11,13 +11,24 @@
 using namespace lotus::usetracessa;
 namespace {
 
+struct FeasibilityConfiguration {
+  bool eventOrder;
+  bool fixedObjects;
+};
+
+class UseTraceSSAPathFeasibility
+    : public ::testing::TestWithParam<FeasibilityConfiguration> {};
+
 /// Feasibility of every (finding, object) witness, keyed by the function
 /// that allocates the object (one malloc %p per function, object 10 + index).
 std::map<std::string, Feasibility> witnesses(const char *ir, NativeHistoryMode mode,
-                                             DefectKind kind, Automaton automaton) {
+                                           DefectKind kind, Automaton automaton,
+                                           FeasibilityConfiguration configuration) {
   llvm::LLVMContext context; llvm::SMDiagnostic diagnostic;
   auto module = llvm::parseAssemblyString(ir, diagnostic, context);
   EXPECT_TRUE(module);
+  if (!module)
+    return {};
   lotus::analysis::SVFG svfg;
   std::map<ObjectID, std::string> owners;
   ObjectID next = 10;
@@ -30,8 +41,13 @@ std::map<std::string, Feasibility> witnesses(const char *ir, NativeHistoryMode m
   NativeLocations locations;
   NativeHistoryOptions options;
   options.locations = &locations;
+  options.eventOrder = configuration.eventOrder;
   auto result = buildUseTraceSSAFromLotusSVFG(svfg, *module, mode, options);
-  auto scan = DefectDetector(result.graph, 3).scan(kind);
+  EXPECT_TRUE(result.graph.verify());
+  EXPECT_EQ(result.eventOrder.has_value(), configuration.eventOrder);
+  DefectScanOptions scanOptions;
+  scanOptions.fixedObjects = configuration.fixedObjects;
+  auto scan = DefectDetector(result.graph, 3).scan(kind, scanOptions);
   PathFeasibility checker(result.graph, locations, std::move(automaton));
   std::map<std::string, Feasibility> verdicts;
   for (std::size_t index = 0; index < scan.findings.size(); ++index)
@@ -53,7 +69,7 @@ std::string program(const char *body) { return std::string(Declarations) + body;
 
 } // namespace
 
-TEST(UseTraceSSAPathFeasibility, CorrelatedBranchesExcludeDoubleFree) {
+TEST_P(UseTraceSSAPathFeasibility, CorrelatedBranchesExcludeDoubleFree) {
   auto ir = program(R"IR(
     define void @correlated(i32 %c) {
     entry:
@@ -86,12 +102,12 @@ TEST(UseTraceSSAPathFeasibility, CorrelatedBranchesExcludeDoubleFree) {
     }
   )IR");
   auto verdicts = witnesses(ir.c_str(), NativeHistoryMode::DoubleFree,
-                            DefectKind::DoubleFree, Automaton::doubleFree());
+                            DefectKind::DoubleFree, Automaton::doubleFree(), GetParam());
   EXPECT_EQ(verdicts.at("correlated"), Feasibility::Infeasible);
   EXPECT_EQ(verdicts.at("twice"), Feasibility::Feasible);
 }
 
-TEST(UseTraceSSAPathFeasibility, CorrelatedBranchesExcludeUseAfterFree) {
+TEST_P(UseTraceSSAPathFeasibility, CorrelatedBranchesExcludeUseAfterFree) {
   auto ir = program(R"IR(
     define void @correlated(i32 %c) {
     entry:
@@ -126,12 +142,12 @@ TEST(UseTraceSSAPathFeasibility, CorrelatedBranchesExcludeUseAfterFree) {
     }
   )IR");
   auto verdicts = witnesses(ir.c_str(), NativeHistoryMode::UseAfterFree,
-                            DefectKind::UseAfterFree, Automaton::useAfterFree());
+                            DefectKind::UseAfterFree, Automaton::useAfterFree(), GetParam());
   EXPECT_EQ(verdicts.at("correlated"), Feasibility::Infeasible);
   EXPECT_EQ(verdicts.at("stale"), Feasibility::Feasible);
 }
 
-TEST(UseTraceSSAPathFeasibility, LeaksAvoidMustReleasesAndFailedAllocations) {
+TEST_P(UseTraceSSAPathFeasibility, LeaksAvoidMustReleasesAndFailedAllocations) {
   auto ir = program(R"IR(
     define void @checked() {
     entry:
@@ -182,13 +198,13 @@ TEST(UseTraceSSAPathFeasibility, LeaksAvoidMustReleasesAndFailedAllocations) {
     }
   )IR");
   auto verdicts = witnesses(ir.c_str(), NativeHistoryMode::MemoryLeak,
-                            DefectKind::MemoryLeak, Automaton::memoryLeak());
+                            DefectKind::MemoryLeak, Automaton::memoryLeak(), GetParam());
   EXPECT_EQ(verdicts.at("checked"), Feasibility::Infeasible);
   EXPECT_EQ(verdicts.at("either"), Feasibility::Infeasible);
   EXPECT_EQ(verdicts.at("leaky"), Feasibility::Feasible);
 }
 
-TEST(UseTraceSSAPathFeasibility, BranchesInLoopsStayUnconstrained) {
+TEST_P(UseTraceSSAPathFeasibility, BranchesInLoopsStayUnconstrained) {
   auto ir = program(R"IR(
     define void @loop(i32 %n) {
     entry:
@@ -207,6 +223,17 @@ TEST(UseTraceSSAPathFeasibility, BranchesInLoopsStayUnconstrained) {
     }
   )IR");
   auto verdicts = witnesses(ir.c_str(), NativeHistoryMode::DoubleFree,
-                            DefectKind::DoubleFree, Automaton::doubleFree());
+                            DefectKind::DoubleFree, Automaton::doubleFree(), GetParam());
   EXPECT_EQ(verdicts.at("loop"), Feasibility::Feasible);
 }
+
+INSTANTIATE_TEST_SUITE_P(
+    SkeletonAndSolver, UseTraceSSAPathFeasibility,
+    ::testing::Values(FeasibilityConfiguration{false, false},
+                      FeasibilityConfiguration{false, true},
+                      FeasibilityConfiguration{true, false},
+                      FeasibilityConfiguration{true, true}),
+    [](const ::testing::TestParamInfo<FeasibilityConfiguration> &info) {
+      return std::string(info.param.eventOrder ? "EventOrder" : "History") +
+             (info.param.fixedObjects ? "Fixed" : "Batch");
+    });

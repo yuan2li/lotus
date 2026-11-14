@@ -9,7 +9,9 @@ oracle  Differential oracle (RQ4). For each program, client and object
         (--object-scopes) or call passing (--pass-calls) are compared
         separately.
         Reports the number of compared queries and lists every mismatch;
-        exits with 1 when there is one.
+        exits with 1 for mismatches, or 2 when coverage cannot be verified
+        (failed/missing runs, missing references, or legacy abstract IDs
+        without stable object keys). Empty object universes are valid comparisons.
 
 match   Cross-tool alert matching and a manual sampling list. Aligns
         UseTraceSSA, UFG and Saber reports by source file and line: the sink
@@ -19,7 +21,8 @@ match   Cross-tool alert matching and a manual sampling list. Aligns
         from the exported object locations; older results without them fall
         back to the sink (double-free) or the witness source (leaks, needs
         --witnesses). Writes a CSV with one row per location and the tools
-        reporting it, plus a seeded random sample.
+        reporting it, plus a seeded random sample. Selects one temporal graph,
+        call-passing setting, MSSA setting and context; ablations are not pooled.
 
 Examples:
     python3 scripts/compare_usetracessa.py oracle eval_results.json
@@ -45,8 +48,8 @@ def load_records(paths):
     for path in paths:
         data = json.loads(Path(path).read_text())
         records += data["records"] if isinstance(data, dict) else data
-    return [record for record in records
-            if record.get("status") == "SUCCESS" and record.get("details")]
+    # Keep failures: an oracle must not turn missing coverage into success.
+    return records
 
 
 def benchmark(record):
@@ -71,9 +74,10 @@ def keyed(details):
     results written before the tools exported object keys."""
     if any("key" not in o for o in details["objects"]):
         return None
+    keys = {o["object"]: o["key"] for o in details["objects"]}
     return (Counter((o["key"], o["status"]) for o in details["objects"]),
-            Counter((finding["site"], key) for finding in details["findings"]
-                    for key in finding.get("object_keys", [])))
+            Counter((finding["site"], keys[obj]) for finding in details["findings"]
+                    for obj in finding["objects"]))
 
 
 def multiset_diffs(expected, actual, what, other):
@@ -82,6 +86,12 @@ def multiset_diffs(expected, actual, what, other):
     diffs += [f"{what} only in {other}: {item} x{count}"
               for item, count in sorted((actual - expected).items())]
     return diffs
+
+
+def oracle_payload(record):
+    details = json.loads(Path(record["details"]).read_text())
+    return ({o["object"]: o["status"] for o in details["objects"]},
+            findings(details), keyed(details))
 
 
 def oracle(records):
@@ -95,51 +105,62 @@ def oracle(records):
         passing = record.get("pass_calls")
         key = (benchmark(record), record["bug_type"], record["object_granularity"],
                record.get("pta") or "andersen", record.get("object_scope") or "heap",
-               "pass-calls" if passing in (None, True) else "enter-calls")
+               "pass-calls" if passing in (None, True) else "enter-calls",
+               record.get("svfg_mssa") or "auto",
+               record.get("context_mode", "sensitive"), record.get("context_limit", 3))
         groups.setdefault(key, []).append(record)
-    compared = mismatches = 0
-    for key in sorted(groups):
+    compared = comparisons = mismatches = unverified = 0
+    for key in sorted(groups, key=str):
         runs = groups[key]
-        reference = next((run for run in runs if all(
-            run.get(name) == value for name, value in REFERENCE.items())), None)
-        if reference is None:
-            print(f"{'/'.join(map(str, key))}: no reference run, skipped")
-            continue
-        expected = json.loads(Path(reference["details"]).read_text())
-        statuses = {o["object"]: o["status"] for o in expected["objects"]}
-        expected_findings = findings(expected)
+        name = "/".join(map(str, key))
+        usable = []
         for run in runs:
+            if run.get("status") != "SUCCESS" or not run.get("details"):
+                print(f"{name}: unverified {config_name(run)}: "
+                      f"{run.get('status')}, details={bool(run.get('details'))}")
+                unverified += 1
+            else:
+                usable.append(run)
+        references = [run for run in usable if all(
+            run.get(field) == value for field, value in REFERENCE.items())]
+        if len(references) != 1:
+            print(f"{name}: expected one reference run, got {len(references)}; unverified")
+            unverified += 1
+            continue
+        reference = references[0]
+        if len(usable) == 1:
+            print(f"{name}: no comparison run; unverified")
+            unverified += 1
+        try:
+            statuses, expected_findings, expected_keys = oracle_payload(reference)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f"{name}: unreadable/invalid reference details: {error}")
+            unverified += 1
+            continue
+        for run in usable:
             if run is reference:
                 continue
-            actual = json.loads(Path(run["details"]).read_text())
-            actual_statuses = {o["object"]: o["status"] for o in actual["objects"]}
-            actual_findings = findings(actual)
+            try:
+                actual_statuses, actual_findings, actual_keys = oracle_payload(run)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                print(f"{name} vs {config_name(run)}: unreadable/invalid details: {error}")
+                unverified += 1
+                continue
             objects = set(statuses) | set(actual_statuses)
             queries = max(len(statuses), len(actual_statuses))
-            compared += queries
             note = ""
-            expected_keys, actual_keys = keyed(expected), keyed(actual)
-            if (set(statuses) != set(actual_statuses) and expected_keys and actual_keys):
+            if expected_keys is not None and actual_keys is not None:
                 # Abstract SVFG object IDs can differ between processes; the
                 # exported keys name objects independently of the run.
-                note = " (object IDs differ between runs; compared by object keys)"
+                note = " (compared by object keys)"
                 diffs = multiset_diffs(expected_keys[0], actual_keys[0], "object",
                                        config_name(run))
                 diffs += multiset_diffs(expected_keys[1], actual_keys[1], "finding",
                                         config_name(run))
-            elif set(statuses) != set(actual_statuses) and len(statuses) == len(actual_statuses):
-                # Results without object keys: abstract SVFG object IDs are not stable;
-                # site-granularity IDs are. Compare what does not name objects.
-                note = " (object IDs differ between runs; compared by status counts)"
-                diffs = [f"{status} objects: {count} vs "
-                         f"{Counter(actual_statuses.values())[status]}"
-                         for status, count in Counter(statuses.values()).items()
-                         if count != Counter(actual_statuses.values())[status]]
-                sites = Counter(site for site, _ in expected_findings)
-                actual_sites = Counter(site for site, _ in actual_findings)
-                diffs += [f"site {site}: {sites[site]} vs {actual_sites[site]} objects"
-                          for site in sorted(set(sites) | set(actual_sites))
-                          if sites[site] != actual_sites[site]]
+            elif key[2] == "abstract":
+                print(f"{name} vs {config_name(run)}: abstract objects lack stable keys; unverified")
+                unverified += 1
+                continue
             else:
                 diffs = [f"object {obj}: {statuses.get(obj)} vs {actual_statuses.get(obj)}"
                          for obj in sorted(objects)
@@ -148,14 +169,17 @@ def oracle(records):
                           for site, obj in sorted(expected_findings - actual_findings)]
                 diffs += [f"finding only in {config_name(run)}: {site} object {obj}"
                           for site, obj in sorted(actual_findings - expected_findings)]
-            name = "/".join(map(str, key)) + f" vs {config_name(run)}"
-            print(f"{name}: {queries} objects, "
+            comparisons += 1
+            compared += queries
+            print(f"{name} vs {config_name(run)}: {queries} objects, "
                   f"{len(actual_findings)} findings, {len(diffs)} mismatches{note}")
             for diff in diffs:
                 print(f"  {diff}")
             mismatches += len(diffs)
     print(f"compared queries (object x configuration): {compared}; "
-          f"mismatches: {mismatches}")
+          f"comparisons: {comparisons}; mismatches: {mismatches}; unverified: {unverified}")
+    if unverified or not comparisons:
+        return 2
     return 1 if mismatches else 0
 
 
@@ -196,13 +220,25 @@ def saber_locations(record, report):
     return result
 
 
-def match(records, out, sample, seed, granularity="site", pta="andersen"):
+def match(records, out, sample, seed, granularity="site", pta="andersen",
+          pass_calls=True, temporal_graph="sparse", svfg_mssa="auto",
+          context_mode="sensitive", context_limit=3):
     table = {}
     for record in records:
+        if record.get("status") != "SUCCESS" or not record.get("details"):
+            continue
         if record.get("repeat", 0) != 0:
             continue
+        if (record.get("context_mode", "sensitive") != context_mode or
+                record.get("context_limit", 3) != context_limit):
+            continue
         if record["tool"] == "usetracessa" and not all(
-                record.get(name) == value for name, value in REFERENCE.items()):
+                record.get(name) == value for name, value in
+                dict(REFERENCE, temporal_graph=temporal_graph).items()):
+            continue
+        if record["tool"] != "saber" and (
+                (record.get("pass_calls") is not False) != pass_calls or
+                (record.get("svfg_mssa") or "auto") != svfg_mssa):
             continue
         if record["tool"] != "saber" and record.get("object_granularity") != granularity:
             continue
@@ -248,7 +284,7 @@ def match(records, out, sample, seed, granularity="site", pta="andersen"):
     return 0
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
     oracle_parser = sub.add_parser("oracle", help="differential oracle")
@@ -264,11 +300,27 @@ def main():
     match_parser.add_argument("--granularity", choices=("site", "abstract"),
                               default="site",
                               help="UseTraceSSA/UFG object granularity to match")
-    args = parser.parse_args()
+    match_parser.add_argument("--pass-calls", choices=("true", "false"), default="true")
+    match_parser.add_argument("--temporal-graph", choices=("sparse", "svfg", "icfg"),
+                              default="sparse")
+    match_parser.add_argument("--svfg-mssa", choices=("auto", "on", "off"), default="auto")
+    match_parser.add_argument("--context", choices=("sensitive", "insensitive"),
+                              default="sensitive")
+    match_parser.add_argument("--context-limit", default="3",
+                              help="Call-string depth, or unlimited")
+    args = parser.parse_args(argv)
     records = load_records(args.results)
     if args.command == "oracle":
         return oracle(records)
-    return match(records, args.out, args.sample, args.seed, args.granularity, args.pta)
+    try:
+        limit = None if args.context_limit == "unlimited" else int(args.context_limit)
+        if limit is not None and limit < 0:
+            raise ValueError
+    except ValueError:
+        parser.error("--context-limit must be a nonnegative integer or unlimited")
+    return match(records, args.out, args.sample, args.seed, args.granularity, args.pta,
+                 args.pass_calls == "true", args.temporal_graph, args.svfg_mssa,
+                 args.context, limit)
 
 
 if __name__ == "__main__":
