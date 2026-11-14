@@ -1,5 +1,15 @@
 ARG baseimage="ubuntu:24.04"
-FROM ${baseimage} AS build
+# Acceptance (no SPEC mount needed):
+#   docker build --target validation --build-arg LOTUS_COMMIT=<full SHA> \
+#     --build-arg LOTUS_DIRTY=false -t lotus-validation .
+# The validation stage runs Python/IR/alias tests and a 116-configuration
+# pipeline smoke. Its /validation directory contains logs and coverage CSVs;
+# compilation artifacts use a BuildKit cache rather than the runtime image.
+# Build the runtime image with the same LOTUS_COMMIT/LOTUS_DIRTY arguments.
+# Then validate its actual runtime libraries and scripts with:
+#   docker run --rm lotus python3 /opt/lotus/scripts/validate_usetracessa.py \
+#     --smoke-only --bin-dir /opt/lotus/build/bin --expected-commit <full SHA>
+FROM ${baseimage} AS build-base
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -32,6 +42,26 @@ WORKDIR /lotus
 
 # Copy source code (.dockerignore drops build trees, .git and benchmark bitcode)
 COPY . .
+
+FROM build-base AS validation
+ARG LOTUS_COMMIT=""
+ARG LOTUS_DIRTY="unknown"
+ARG BUILD_JOBS=4
+ENV LOTUS_COMMIT=${LOTUS_COMMIT}
+ENV LOTUS_DIRTY=${LOTUS_DIRTY}
+RUN test -n "${LOTUS_COMMIT}" || (echo 'Pass --build-arg LOTUS_COMMIT=<full SHA>' >&2; exit 1)
+RUN --mount=type=cache,id=lotus-validation-build,target=/lotus/build,sharing=locked \
+    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          -DLLVM_BUILD_PATH=${LLVM_BUILD_PATH} -DLLVM_DIR=${LLVM_DIR} \
+          -DZ3_DIR=${Z3_DIR} -DLOTUS_BUILD_TESTS=ON \
+          -DLOTUS_TEST_SUBSYSTEMS="ir;alias" -DLOTUS_TOOL_FAMILIES="ir;checker" \
+          -DLOTUS_BUILD_ALL_LIBRARIES=OFF && \
+    cmake --build build --parallel ${BUILD_JOBS} \
+          --target ir_tests alias_tests lotus-ir-usetracessa lotus-ir-ufg lotus-check && \
+    python3 -B scripts/validate_usetracessa.py --out-dir /validation \
+          --expected-commit "${LOTUS_COMMIT}"
+
+FROM build-base AS build
 
 # Create build directory and configure
 RUN mkdir -p build && cd build && \
@@ -83,7 +113,10 @@ COPY --from=build /usr/local/lib /usr/local/lib
 #       --manifest /opt/lotus/scripts/manifests/spec-paper.json
 COPY --from=build /opt/lotus /opt/lotus
 ARG LOTUS_COMMIT=""
+ARG LOTUS_DIRTY="unknown"
 ENV LOTUS_COMMIT=${LOTUS_COMMIT}
+ENV LOTUS_DIRTY=${LOTUS_DIRTY}
+LABEL org.opencontainers.image.revision=${LOTUS_COMMIT}
 ENV LOTUS_BIN_DIR=/opt/lotus/build/bin
 ENV LOTUS_BENCHMARKS_ROOT=/opt/lotus
 

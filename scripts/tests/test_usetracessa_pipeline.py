@@ -10,6 +10,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def load_script(name):
@@ -182,9 +185,10 @@ class OracleTests(PipelineTestCase):
 class MatchTests(PipelineTestCase):
     def matching(self, records, **options):
         out = self.root / "matches.csv"
+        expected_status = options.pop("expected_status", 0)
         result, _ = self.quiet(compare.match, records, out, 0, 2027,
                                granularity="abstract", **options)
-        self.assertEqual(result, 0)
+        self.assertEqual(result, expected_status)
         return self.csv_rows(out)
 
     def test_call_passing_settings_are_never_unioned(self):
@@ -203,11 +207,13 @@ class MatchTests(PipelineTestCase):
                 self.assertEqual([r["location"] for r in self.matching(records, **options)],
                                  [f"test.c:{line}"])
 
-    def test_failed_runs_and_other_contexts_are_excluded(self):
+    def test_failed_runs_are_retained_and_other_contexts_are_excluded(self):
         records = [self.with_details(self.details(line=10)),
                    self.with_details(self.details(line=20), context_limit=None),
-                   self.with_details(self.details(line=30), status="SPEC_ERROR")]
-        self.assertEqual([r["location"] for r in self.matching(records)], ["test.c:10"])
+                   self.record(tool="saber", status="SPEC_ERROR", details=None)]
+        rows = self.matching(records, expected_status=2)
+        self.assertEqual([r["location"] for r in rows], ["test.c:10"])
+        self.assertEqual(rows[0]["saber/nosmt_status"], "SPEC")
 
     def test_legacy_call_passing_default_and_saber_are_retained(self):
         legacy = self.with_details()
@@ -219,12 +225,14 @@ class MatchTests(PipelineTestCase):
         self.assertEqual(row["saber/nosmt"], "1")
 
     def test_cli_passes_selection_and_sampling_is_reproducible(self):
-        records = [self.with_details(self.details(line=line), pass_calls=False,
-                                     temporal_graph="svfg") for line in (10, 20, 30)]
+        details = self.details()
+        details["findings"] = [self.details(line=line)["findings"][0] for line in (10, 20, 30)]
+        records = [self.with_details(details, pass_calls=False, temporal_graph="svfg")]
         path = self.write_json(records)
         out = self.root / "matched.csv"
         args = ["match", str(path), "--out", str(out), "--granularity", "abstract",
-                "--pass-calls", "false", "--temporal-graph", "svfg", "--sample", "2"]
+                "--pass-calls", "false", "--temporal-graph", "svfg", "--sample", "2",
+                "--tools", "usetracessa"]
         self.assertEqual(self.quiet(compare.main, args)[0], 0)
         first = out.read_text()
         self.assertEqual(sum(int(r["sampled"]) for r in self.csv_rows(out)), 2)

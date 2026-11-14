@@ -12,6 +12,10 @@ other clients (D5), MSSA auto and Saber nosmt. --temporal-graph selects the
 main UseTraceSSA skeleton without changing tool defaults or deciding P1.
 Table 5 covers {sparse, svfg} x {batch, fixed}, separately for each call-passing
 setting present in the input. All selections are recorded in selection.json.
+Budgets and witness-feasibility settings are separate configurations. Multiple
+files require the same verified commit and clean trees; a single legacy file
+without provenance can still be inspected. Select nondefault budgets and
+--path-feasibility explicitly for paper tables; runs.csv retains every group.
 
 Outputs (in --out-dir):
     runs.csv          every configuration with medians and run counts
@@ -38,10 +42,13 @@ import json
 from pathlib import Path
 import statistics
 import sys
+from usetracessa_results import (add_analysis_options, canonical_limits,
+                                feasibility_enabled, load_results, selected_limits)
 
 CONFIG_KEYS = ("benchmark", "tool", "bug_type", "smt_mode", "object_mode",
                "temporal_graph", "object_granularity", "svfg_mssa", "pta", "object_scope",
-               "pass_calls", "context_mode", "context_limit")
+               "pass_calls", "context_mode", "context_limit", "path_feasibility",
+               "search_limits", "lotus_commit", "lotus_dirty")
 METRICS = ("analysis_ms", "total_ms", "check_ms", "build_ms", "parse_ms", "svfg_ms", "pta_ms",
            "max_rss_mb", "wall_time_s", "findings", "finding_sites",
            "product_states", "product_edges", "summary_pairs", "pushes",
@@ -65,16 +72,7 @@ CLIENTS = {"double-free": "DF", "use-after-free": "UAF",
 
 
 def load(paths):
-    records = []
-    for path in paths:
-        data = json.loads(Path(path).read_text())
-        # Older result files are a bare list of records.
-        records += data["records"] if isinstance(data, dict) else data
-    for record in records:
-        if not record.get("benchmark"):
-            record["benchmark"] = Path(record["bc"]).stem
-        record.setdefault("repeat", 0)
-    return records
+    return load_results(paths)
 
 
 def label(status):
@@ -96,6 +94,8 @@ def aggregate(records):
         for name, value in defaults.items():
             if name not in record or (record[name] is None and name != "context_limit"):
                 configuration[name] = value
+        configuration["path_feasibility"] = feasibility_enabled(record)
+        configuration["search_limits"] = canonical_limits(record["tool"], record.get("search_limits"))
         key = tuple(configuration[name] for name in CONFIG_KEYS)
         groups.setdefault(key, []).append(record)
     rows = {}
@@ -134,7 +134,10 @@ def find(rows, benchmark, bug_type, tool, **config):
                         svfg_mssa="auto", pta="andersen", object_scope="heap", pass_calls=True)
     if tool == "usetracessa":
         defaults.update(object_mode="batch", temporal_graph="sparse")
+    defaults.update(path_feasibility=False, search_limits=canonical_limits(tool))
     wanted = dict(defaults, **config)
+    if isinstance(wanted["search_limits"], dict):
+        wanted["search_limits"] = canonical_limits(tool, wanted["search_limits"])
     for row in rows.values():
         if (row["benchmark"] == benchmark and row["bug_type"] == bug_type and
                 row["tool"] == tool and
@@ -205,6 +208,7 @@ def main(argv=None):
     parser.add_argument("--object-scope", choices=("heap", "all"), default="heap")
     parser.add_argument("--context", choices=("sensitive", "insensitive"), default="sensitive")
     parser.add_argument("--context-limit", default="3", help="Call-string depth, or unlimited")
+    add_analysis_options(parser)
     args = parser.parse_args(argv)
     try:
         limit = None if args.context_limit == "unlimited" else int(args.context_limit)
@@ -212,7 +216,11 @@ def main(argv=None):
             raise ValueError
     except ValueError:
         parser.error("--context-limit must be a nonnegative integer or unlimited")
-    rows = aggregate(load(args.results))
+    try:
+        records = load(args.results)
+        rows = aggregate(records)
+    except ValueError as error:
+        parser.error(str(error))
     args.out_dir.mkdir(parents=True, exist_ok=True)
     selection = {"temporal_graph": args.temporal_graph,
                  "object_granularity": args.object_granularity,
@@ -221,6 +229,11 @@ def main(argv=None):
                  "pass_calls": args.pass_calls == "true", "svfg_mssa": args.svfg_mssa,
                  "pta": args.pta, "object_scope": args.object_scope,
                  "context_mode": args.context, "context_limit": limit,
+                 "path_feasibility": args.path_feasibility,
+                 "ir_budgets": selected_limits(args, "usetracessa"),
+                 "saber_budgets": selected_limits(args, "saber"),
+                 "lotus_commit": records[0].get("lotus_commit") if records else None,
+                 "lotus_dirty": records[0].get("lotus_dirty") if records else None,
                  "status_legend": {"OK": "successful run", "UNK": "unknown, incomplete model",
                                    "NA": "configuration absent", "TO": "timeout", "OOM": "out of memory",
                                    "INC": "search incomplete", "PE": "parse error",
@@ -243,7 +256,9 @@ def main(argv=None):
                        if args.object_granularity == "auto" else args.object_granularity)
 
         def select(tool, **overrides):
-            config = {"context_mode": args.context, "context_limit": limit}
+            config = {"context_mode": args.context, "context_limit": limit,
+                      "search_limits": selected_limits(args, tool),
+                      "path_feasibility": args.path_feasibility if tool == "usetracessa" else False}
             if tool != "saber":
                 config.update(object_granularity=granularity, svfg_mssa=args.svfg_mssa,
                               pta=args.pta, object_scope=args.object_scope,

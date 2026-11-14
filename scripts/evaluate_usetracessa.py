@@ -429,6 +429,7 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
         "pta": task["pta"],
         "object_scope": task["object_scope"],
         "pass_calls": task["pass_calls"],
+        "path_feasibility": path_feasibility if tool == "usetracessa" else False,
         "attempts": attempt,
         "bc": bc_path.name, "bc_path": str(bc_path),
         "analysis_scope": ("context-bounded-icfg-candidate"
@@ -466,8 +467,8 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
 def command_output(cmd):
     try:
         return subprocess.check_output(cmd, cwd=ROOT, stderr=subprocess.DEVNULL,
-                                       text=True).strip()
-    except (OSError, subprocess.CalledProcessError):
+                                       text=True, timeout=10).strip()
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
 
 
@@ -516,11 +517,14 @@ def run_metadata(args, binaries, limits):
         if match:
             llvm = match.group(1)
             break
-    status = command_output(["git", "status", "--porcelain", "--untracked-files=no"])
+    status = command_output(["git", "status", "--porcelain"])
+    dirty = bool(status) if status is not None else {
+        "true": True, "false": False}.get(os.environ.get("LOTUS_DIRTY", "").lower())
     return {
         "started": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
         "lotus_commit": git_commit(),
-        "lotus_dirty": bool(status) if status is not None else None,
+        "lotus_dirty": dirty,
+        "path_feasibility": args.path_feasibility,
         "llvm_version": llvm,
         "cpu": cpu_model(),
         "cpu_count": os.cpu_count(),

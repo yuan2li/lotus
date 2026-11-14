@@ -23,6 +23,14 @@ match   Cross-tool alert matching and a manual sampling list. Aligns
         --witnesses). Writes a CSV with one row per location and the tools
         reporting it, plus a seeded random sample. Selects one temporal graph,
         call-passing setting, MSSA setting and context; ablations are not pooled.
+        Zero-alert tools retain a 0 column; failed, missing or incomplete
+        negative results are NA with explicit status columns. A sidecar
+        .coverage.csv includes even program/client pairs with no alerts.
+        Returns 2 if coverage is incomplete. --tools declares expected tools
+        (default all three); budgets and feasibility are selected explicitly.
+
+Multiple input files must identify one verified commit and clean source trees.
+Single legacy files without commit metadata remain readable.
 
 Examples:
     python3 scripts/compare_usetracessa.py oracle eval_results.json
@@ -36,6 +44,8 @@ import json
 from pathlib import Path
 import random
 import sys
+from usetracessa_results import (STATUS_LABELS, add_analysis_options, canonical_limits,
+                                feasibility_enabled, load_results, selected_limits)
 
 REFERENCE = {"tool": "usetracessa", "object_mode": "batch", "temporal_graph": "sparse"}
 LEAKS = ("memory-leak", "file-leak")
@@ -44,12 +54,7 @@ BY_ALLOCATION = LEAKS + ("double-free",)
 
 
 def load_records(paths):
-    records = []
-    for path in paths:
-        data = json.loads(Path(path).read_text())
-        records += data["records"] if isinstance(data, dict) else data
-    # Keep failures: an oracle must not turn missing coverage into success.
-    return records
+    return load_results(paths)
 
 
 def benchmark(record):
@@ -222,13 +227,14 @@ def saber_locations(record, report):
 
 def match(records, out, sample, seed, granularity="site", pta="andersen",
           pass_calls=True, temporal_graph="sparse", svfg_mssa="auto",
-          context_mode="sensitive", context_limit=3):
-    table = {}
+          context_mode="sensitive", context_limit=3, tools=None,
+          path_feasibility=False, budgets=None, saber_budgets=None):
+    requested = set(tools) if tools is not None else {r["tool"] for r in records}
+    groups = {}
     for record in records:
-        if record.get("status") != "SUCCESS" or not record.get("details"):
+        if record["tool"] not in requested or record.get("repeat", 0) != 0:
             continue
-        if record.get("repeat", 0) != 0:
-            continue
+        group = groups.setdefault((benchmark(record), record["bug_type"]), {})
         if (record.get("context_mode", "sensitive") != context_mode or
                 record.get("context_limit", 3) != context_limit):
             continue
@@ -238,25 +244,73 @@ def match(records, out, sample, seed, granularity="site", pta="andersen",
             continue
         if record["tool"] != "saber" and (
                 (record.get("pass_calls") is not False) != pass_calls or
-                (record.get("svfg_mssa") or "auto") != svfg_mssa):
+                (record.get("svfg_mssa") or "auto") != svfg_mssa or
+                record.get("object_granularity") != granularity or
+                (record.get("pta") or "andersen") != pta or
+                (record.get("object_scope") or "heap") != "heap"):
             continue
-        if record["tool"] != "saber" and record.get("object_granularity") != granularity:
+        if (record["tool"] == "usetracessa" and
+                feasibility_enabled(record) != path_feasibility):
             continue
-        if record["tool"] != "saber" and (record.get("pta") or "andersen") != pta:
+        limits = saber_budgets if record["tool"] == "saber" else budgets
+        if canonical_limits(record["tool"], record.get("search_limits")) != canonical_limits(record["tool"], limits):
             continue
-        if record["tool"] != "saber" and (record.get("object_scope") or "heap") != "heap":
-            continue
-        details = json.loads(Path(record["details"]).read_text())
-        sites = (saber_locations(record, details) if record["tool"] == "saber"
-                 else ir_locations(record, details))
-        for site in sites:
-            key = (benchmark(record), record["bug_type"], site)
-            table.setdefault(key, set()).add(config_name(record))
-    tools = sorted({tool for reported in table.values() for tool in reported})
-    rows = []
-    for key in sorted(table):
-        reported = table[key]
-        rows.append(list(key) + [int(tool in reported) for tool in tools])
+        group.setdefault(config_name(record), []).append(record)
+
+    columns = {name for group in groups.values() for name in group}
+    for tool in requested:
+        if tool == "usetracessa":
+            columns.add(f"usetracessa/batch/{temporal_graph}")
+        elif tool == "ufg":
+            columns.add("ufg")
+        elif tool == "saber" and not any(name.startswith("saber/") for name in columns):
+            columns.add("saber/nosmt")
+    columns = sorted(columns)
+    rows, coverage = [], []
+    unverified = 0
+    for key, group in sorted(groups.items()):
+        states, locations = {}, {}
+        for column in columns:
+            runs = group.get(column, [])
+            state, sites = "NA", set()
+            if len(runs) > 1:
+                state = "DUP"
+            elif runs:
+                run = runs[0]
+                state = STATUS_LABELS.get(run.get("status"), "ERR")
+                if state == "OK":
+                    try:
+                        details = json.loads(Path(run["details"]).read_text())
+                        if run["tool"] == "saber" and not isinstance(details.get("BugTypes"), list):
+                            raise ValueError("missing Saber BugTypes array")
+                        sites = (saber_locations(run, details) if run["tool"] == "saber"
+                                 else ir_locations(run, details))
+                        has_alerts = (any(b.get("Valid", True) for kind in details["BugTypes"]
+                                          for b in kind.get("Reports", [])) if run["tool"] == "saber"
+                                      else bool(details["findings"]))
+                        if has_alerts and not sites:
+                            raise ValueError("findings have no usable source locations")
+                        if (run.get("unknown_incomplete_model") or run.get("model_complete") is False or
+                                details.get("status") == "Unknown" or details.get("exhaustive") is False):
+                            state = "UNK"
+                    except (OSError, ValueError, KeyError, TypeError):
+                        state = "PE"
+            states[column], locations[column] = state, sites
+        # Saber has no SMT UAF client; a global SMT column is not required here.
+        required = [c for c in columns if not (c == "saber/smt" and key[1] == "use-after-free")]
+        complete = bool(required) and all(states[c] == "OK" for c in required)
+        unverified += not complete
+        union = set().union(*locations.values()) if locations else set()
+        for site in sorted(union):
+            flags = [1 if site in locations[c] else 0 if states[c] == "OK" else "NA"
+                     for c in columns]
+            rows.append(list(key) + [site] + flags + [states[c] for c in columns])
+        counts = [len(locations[c]) if states[c] == "OK" else "NA" for c in columns]
+        coverage.append(list(key) + counts + [states[c] for c in columns] + [complete])
+        both = sum(all(site in locations[c] for c in required) for site in union) if complete else "NA"
+        print(f"{key[0]}/{key[1]}: {len(union)} locations, " +
+              ", ".join(f"{c}={counts[i]} ({states[c]})" for i, c in enumerate(columns)) +
+              f", all={both}")
     chosen = set()
     if sample:
         rng = random.Random(seed)
@@ -265,23 +319,29 @@ def match(records, out, sample, seed, granularity="site", pta="andersen",
             by_client.setdefault((row[0], row[1]), []).append(index)
         for indices in by_client.values():
             chosen.update(rng.sample(indices, min(sample, len(indices))))
-    with open(out, "w", newline="") as output:
+    out = Path(out)
+    status_columns = [c + "_status" for c in columns]
+    with out.open("w", newline="") as output:
         writer = csv.writer(output)
-        writer.writerow(["program", "client", "location"] + tools +
+        writer.writerow(["program", "client", "location"] + columns + status_columns +
                         ["sampled", "verdict", "notes"])
         for index, row in enumerate(rows):
             writer.writerow(row + [int(index in chosen), "", ""])
-    summary = {}
-    for row in rows:
-        summary.setdefault((row[0], row[1]), []).append(row[3:])
-    for (program, client), flags in sorted(summary.items()):
-        counts = {tool: sum(flag[i] for flag in flags) for i, tool in enumerate(tools)}
-        both = sum(all(flag) for flag in flags)
-        print(f"{program}/{client}: {len(flags)} locations, " +
-              ", ".join(f"{tool}={count}" for tool, count in counts.items()) +
-              f", all={both}")
-    print(f"wrote {len(rows)} locations ({len(chosen)} sampled) to {out}")
-    return 0
+    with out.with_suffix(".coverage.csv").open("w", newline="") as output:
+        writer = csv.writer(output)
+        writer.writerow(["program", "client"] + columns + status_columns + ["complete"])
+        writer.writerows(coverage)
+    selection = dict(tools=sorted(requested), temporal_graph=temporal_graph,
+                     object_granularity=granularity, pta=pta, pass_calls=pass_calls,
+                     svfg_mssa=svfg_mssa, context_mode=context_mode, context_limit=context_limit,
+                     path_feasibility=path_feasibility, ir_budgets=budgets or {},
+                     saber_budgets=saber_budgets or {},
+                     lotus_commit=records[0].get("lotus_commit") if records else None,
+                     lotus_dirty=records[0].get("lotus_dirty") if records else None)
+    out.with_suffix(".selection.json").write_text(json.dumps(selection, indent=2) + "\n")
+    print(f"wrote {len(rows)} locations ({len(chosen)} sampled) to {out}; "
+          f"unverified program/client groups: {unverified}")
+    return 2 if unverified or not groups else 0
 
 
 def main(argv=None):
@@ -308,8 +368,14 @@ def main(argv=None):
                               default="sensitive")
     match_parser.add_argument("--context-limit", default="3",
                               help="Call-string depth, or unlimited")
+    match_parser.add_argument("--tools", default="usetracessa,ufg,saber",
+                              help="Expected tools; missing runs remain NA")
+    add_analysis_options(match_parser)
     args = parser.parse_args(argv)
-    records = load_records(args.results)
+    try:
+        records = load_records(args.results)
+    except ValueError as error:
+        parser.error(str(error))
     if args.command == "oracle":
         return oracle(records)
     try:
@@ -318,9 +384,14 @@ def main(argv=None):
             raise ValueError
     except ValueError:
         parser.error("--context-limit must be a nonnegative integer or unlimited")
+    requested = args.tools.split(",")
+    if (not requested or len(set(requested)) != len(requested) or
+            any(tool not in ("usetracessa", "ufg", "saber") for tool in requested)):
+        parser.error("--tools must list distinct names from usetracessa,ufg,saber")
     return match(records, args.out, args.sample, args.seed, args.granularity, args.pta,
                  args.pass_calls == "true", args.temporal_graph, args.svfg_mssa,
-                 args.context, limit)
+                 args.context, limit, requested, args.path_feasibility,
+                 selected_limits(args, "usetracessa"), selected_limits(args, "saber"))
 
 
 if __name__ == "__main__":
