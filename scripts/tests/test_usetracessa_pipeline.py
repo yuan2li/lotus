@@ -194,8 +194,8 @@ class MatchTests(PipelineTestCase):
     def test_call_passing_settings_are_never_unioned(self):
         records = [self.with_details(self.details(line=10)),
                    self.with_details(self.details(line=20), pass_calls=False)]
-        self.assertEqual([r["location"] for r in self.matching(records)], ["test.c:10"])
-        self.assertEqual([r["location"] for r in self.matching(records, pass_calls=False)], ["test.c:20"])
+        self.assertEqual([r["location"] for r in self.matching(records)], ["src/test.c:10"])
+        self.assertEqual([r["location"] for r in self.matching(records, pass_calls=False)], ["src/test.c:20"])
 
     def test_graph_and_mssa_selection(self):
         records = [self.with_details(self.details(line=10)),
@@ -205,14 +205,14 @@ class MatchTests(PipelineTestCase):
                               (dict(svfg_mssa="on"), 30)]:
             with self.subTest(options=options):
                 self.assertEqual([r["location"] for r in self.matching(records, **options)],
-                                 [f"test.c:{line}"])
+                                 [f"src/test.c:{line}"])
 
     def test_failed_runs_are_retained_and_other_contexts_are_excluded(self):
         records = [self.with_details(self.details(line=10)),
                    self.with_details(self.details(line=20), context_limit=None),
                    self.record(tool="saber", status="SPEC_ERROR", details=None)]
         rows = self.matching(records, expected_status=2)
-        self.assertEqual([r["location"] for r in rows], ["test.c:10"])
+        self.assertEqual([r["location"] for r in rows], ["src/test.c:10"])
         self.assertEqual(rows[0]["saber/nosmt_status"], "SPEC")
 
     def test_legacy_call_passing_default_and_saber_are_retained(self):

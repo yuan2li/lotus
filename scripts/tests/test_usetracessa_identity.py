@@ -201,7 +201,7 @@ class CoverageTests(PipelineTestCase):
                               ({"budgets": {"max-product-states": 10}}, 30)):
             with self.subTest(options=options):
                 rows, _, _ = self.matching(records, **options)
-                self.assertEqual([row["location"] for row in rows], [f"test.c:{line}"])
+                self.assertEqual([row["location"] for row in rows], [f"src/test.c:{line}"])
 
 
 class ValidationTests(PipelineTestCase):
@@ -257,6 +257,8 @@ class ValidationTests(PipelineTestCase):
         self.assertEqual(code, 0)
         self.assertNotIn("ir_tests", calls)
         self.assertIn("match", calls)
+        self.assertIn('!DIFile(filename: "validation/fixture.c"',
+                      (self.root / "out/fixture.ll").read_text())
 
     def test_validation_rejects_matching_infrastructure_failure(self):
         binaries, step, _ = self.validation_bundle(coverage_status="PE")

@@ -15,6 +15,7 @@
 #include <llvm/ADT/BitVector.h>
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/ADT/SmallString.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Dominators.h>
@@ -23,6 +24,7 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Support/Path.h>
 #include <llvm/Support/raw_ostream.h>
 
 namespace lotus {
@@ -31,6 +33,21 @@ namespace {
 
 using NativeNode = analysis::SVFGNode;
 using NativeEdge = analysis::SVFGEdge;
+
+std::string sourceFile(const llvm::DILocation &location) {
+  const auto filename = location.getFilename();
+  if (filename.empty()) return "";
+  llvm::SmallString<256> path;
+  // Match Saber's DebugInfoAnalysis: DIFile often stores the directory
+  // separately. Dropping it makes distinct files share an alert identity.
+  if (!location.getDirectory().empty() &&
+      !llvm::sys::path::has_root_directory(filename))
+    llvm::sys::path::append(path, location.getDirectory(), filename);
+  else
+    path = filename;
+  llvm::sys::path::remove_dots(path, true);
+  return path.str().str();
+}
 
 class PhaseTimer {
   using Clock = std::chrono::steady_clock;
@@ -974,7 +991,7 @@ void appendTemporalFacts(
              .history.use(history.sites.at(site), history.execution))
       continue;
     result.graph.setSourceLocation(history.after(result.graph, site),
-                                   location->getFilename().str() + ':' +
+                                   sourceFile(*location) + ':' +
                                        std::to_string(location.getLine()) +
                                        ':' + std::to_string(location.getCol()));
   }
@@ -1176,7 +1193,7 @@ void appendEventOrderFacts(
             graph.setNative(stop.node, native->second);
           if (const auto &location = source->getDebugLoc())
             graph.setSourceLocation(stop.node,
-                                    location->getFilename().str() + ':' +
+                                    sourceFile(*location) + ':' +
                                         std::to_string(location.getLine()) + ':' +
                                         std::to_string(location.getCol()));
           stop.objects = &guarded->objects;
@@ -1561,7 +1578,7 @@ std::string StableObjectKeys::location(ObjectID object) const {
   const auto *instruction = llvm::dyn_cast_or_null<llvm::Instruction>(allocation(object));
   const auto &debug = instruction ? instruction->getDebugLoc() : llvm::DebugLoc();
   if (!debug) return "";
-  return debug->getFilename().str() + ":" + std::to_string(debug.getLine());
+  return sourceFile(*debug) + ":" + std::to_string(debug.getLine());
 }
 
 } // namespace usetracessa

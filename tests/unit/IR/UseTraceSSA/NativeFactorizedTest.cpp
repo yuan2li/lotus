@@ -9,6 +9,8 @@
 
 #include <gtest/gtest.h>
 #include <llvm/AsmParser/Parser.h>
+#include <llvm/BinaryFormat/Dwarf.h>
+#include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
@@ -17,6 +19,59 @@
 
 using namespace lotus::usetracessa;
 namespace {
+TEST(UseTraceSSANative, SourceLocationsPreserveDIFileDirectories) {
+  for (const auto &file : std::vector<std::pair<std::string, std::string>>{
+           {"util.c", "/build/libA"}, {"util.c", "/build/libB"},
+           {"/absolute/util.c", "/ignored"}, {"util.c", "src/./libA"}}) {
+    SCOPED_TRACE(file.first + " in " + file.second);
+    llvm::LLVMContext context;
+    llvm::SMDiagnostic diagnostic;
+    auto module = llvm::parseAssemblyString(R"IR(
+      declare i8* @malloc(i64)
+      declare void @free(i8*)
+      define i8 @main() {
+        %p = call i8* @malloc(i64 8)
+        call void @free(i8* %p)
+        %stale = load i8, i8* %p
+        ret i8 %stale
+      }
+    )IR", diagnostic, context);
+    ASSERT_TRUE(module);
+    llvm::DIBuilder debug(*module);
+    auto *source = debug.createFile(file.first, file.second);
+    debug.createCompileUnit(llvm::dwarf::DW_LANG_C, source, "test", false, "", 0);
+    auto *scope = debug.createFunction(
+        source, "main", "main", source, 1,
+        debug.createSubroutineType(debug.getOrCreateTypeArray({})), 1,
+        llvm::DINode::FlagZero, llvm::DISubprogram::SPFlagDefinition);
+    auto *function = module->getFunction("main");
+    function->setSubprogram(scope);
+    unsigned line = 10;
+    for (auto &instruction : llvm::instructions(function)) {
+      instruction.setDebugLoc(llvm::DILocation::get(context, line, 1, scope));
+      line += 10;
+    }
+    debug.finalize();
+    const std::string path = file.first.front() == '/' ? file.first :
+        file.second == "src/./libA" ? "src/libA/util.c" : file.second + "/util.c";
+    auto *allocation = &function->getEntryBlock().front();
+    lotus::analysis::SVFG svfg;
+    svfg.setObjectValue(10, allocation);
+    svfg.addObjectForValue(allocation, 10);
+    EXPECT_EQ(StableObjectKeys(svfg, *module).location(10), path + ":10");
+    for (bool eventOrder : {false, true}) {
+      NativeHistoryOptions options;
+      options.eventOrder = eventOrder;
+      auto result = buildUseTraceSSAFromLotusSVFG(
+          svfg, *module, NativeHistoryMode::UseAfterFree, options);
+      bool found = false;
+      for (const auto &node : result.graph.nodes())
+        found |= node.sourceLocation == path + ":30:1";
+      EXPECT_TRUE(found) << "eventOrder=" << eventOrder;
+    }
+  }
+}
+
 // Fixed-object scans must agree with the mask-lifted batch scan on every sink,
 // object and per-object status, with eager and deferred witnesses.
 void expectFixedMatchesBatch(const TraceFlowGraph &graph, DefectKind kind) {

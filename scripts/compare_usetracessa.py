@@ -28,6 +28,10 @@ match   Cross-tool alert matching and a manual sampling list. Aligns
         .coverage.csv includes even program/client pairs with no alerts.
         Returns 2 if coverage is incomplete. --tools declares expected tools
         (default all three); budgets and feasibility are selected explicitly.
+        Paths retain directories. Repeat --source-prefix-map OLD=NEW to align
+        different build roots. Basename-only locations are AMB (unverified);
+        resolve them by an explicit mapping to a qualified source path or
+        regenerate details with directory information.
 
 Multiple input files must identify one verified commit and clean source trees.
 Single legacy files without commit metadata remain readable.
@@ -42,10 +46,12 @@ from collections import Counter
 import csv
 import json
 from pathlib import Path
+import posixpath
 import random
 import sys
 from usetracessa_results import (STATUS_LABELS, add_analysis_options, canonical_limits,
-                                feasibility_enabled, load_results, selected_limits)
+                                canonical_context_limit, feasibility_enabled,
+                                load_results, selected_limits)
 
 REFERENCE = {"tool": "usetracessa", "object_mode": "batch", "temporal_graph": "sparse"}
 LEAKS = ("memory-leak", "file-leak")
@@ -112,7 +118,8 @@ def oracle(records):
                record.get("pta") or "andersen", record.get("object_scope") or "heap",
                "pass-calls" if passing in (None, True) else "enter-calls",
                record.get("svfg_mssa") or "auto",
-               record.get("context_mode", "sensitive"), record.get("context_limit", 3))
+               record.get("context_mode", "sensitive"),
+               canonical_context_limit(record.get("context_limit", 3)))
         groups.setdefault(key, []).append(record)
     compared = comparisons = mismatches = unverified = 0
     for key in sorted(groups, key=str):
@@ -188,32 +195,65 @@ def oracle(records):
     return 1 if mismatches else 0
 
 
-def location(text):
-    """Normalize 'func:path/file.c:line:col' or a file path plus line to file:line."""
-    parts = text.split(":")
-    if len(parts) >= 3 and parts[-1].isdigit() and parts[-2].isdigit():
-        return f"{Path(parts[-3]).name}:{parts[-2]}"
+def source_path(text):
+    # Lexical normalization: paths belong to the producer, not this machine.
+    return posixpath.normpath(text.replace("\\", "/"))
+
+
+def prefix_map(text):
+    old, separator, new = text.partition("=")
+    if not separator or not old or not new:
+        raise argparse.ArgumentTypeError("expected OLD=NEW source path prefix")
+    return source_path(old), source_path(new)
+
+
+def file_line(path, line, path_maps=()):
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError("empty source file path")
+    path = source_path(path)
+    # Longest match, on a path-component boundary; never guess by basename.
+    for old, new in sorted(path_maps, key=lambda pair: len(pair[0]), reverse=True):
+        if path == old or path.startswith(old.rstrip("/") + "/"):
+            path = source_path(new.rstrip("/") + "/" + path[len(old):].lstrip("/"))
+            break
+    return f"{path}:{int(line)}"
+
+
+def location(text, path_maps=(), function_prefix=True):
+    """Decode func:path:line:col without losing directory or drive letters."""
+    parts = text.rsplit(":", 2)
+    if len(parts) == 3 and parts[-1].isdigit() and parts[-2].isdigit():
+        path = parts[0]
+        if function_prefix:
+            prefix, separator, path = path.rpartition(":")
+            if not separator:
+                return None
+            if (len(prefix) >= 2 and prefix[-2] == ":" and prefix[-1].isalpha()
+                    and path.startswith(("/", "\\"))):
+                path = prefix[-1] + ":" + path
+        if path:
+            return file_line(path, parts[-2], path_maps)
     return None
 
 
-def ir_locations(record, details):
+def ir_locations(record, details, path_maps=()):
     result = set()
     allocated = {o["object"]: o.get("location") for o in details["objects"]}
     for finding in details["findings"]:
         sites = [allocated.get(obj) for obj in finding["objects"]]
         if record["bug_type"] in BY_ALLOCATION and sites and all(sites):
-            result.update(location("x:" + site + ":0") for site in sites)
+            result.update(location(site + ":0", path_maps, False) for site in sites)
         elif record["bug_type"] in LEAKS:
             steps = [step for step in finding.get("witness", []) if step["location"]]
             if steps:
-                result.add(location("x:" + steps[0]["location"]))
+                result.add(location(steps[0]["location"], path_maps, False))
         else:
-            result.add(location(finding["site"]))
+            result.add(location(finding["site"], path_maps))
     result.discard(None)
     return result
 
 
-def saber_locations(record, report):
+def saber_locations(record, report, path_maps=()):
     result = set()
     for bug_type in report.get("BugTypes", []):
         for bug in bug_type.get("Reports", []):
@@ -221,14 +261,18 @@ def saber_locations(record, report):
             if not steps or not bug.get("Valid", True):
                 continue
             step = steps[0] if record["bug_type"] in BY_ALLOCATION else steps[-1]
-            result.add(f"{Path(step['File']).name}:{step['Line']}")
+            result.add(file_line(step['File'], step['Line'], path_maps))
     return result
 
 
 def match(records, out, sample, seed, granularity="site", pta="andersen",
           pass_calls=True, temporal_graph="sparse", svfg_mssa="auto",
           context_mode="sensitive", context_limit=3, tools=None,
-          path_feasibility=False, budgets=None, saber_budgets=None):
+          path_feasibility=False, budgets=None, saber_budgets=None, path_maps=()):
+    context_limit = canonical_context_limit(context_limit)
+    path_maps = [(source_path(old), source_path(new)) for old, new in path_maps]
+    if len({old for old, _ in path_maps}) != len(path_maps):
+        raise ValueError("duplicate source path prefix mappings")
     requested = set(tools) if tools is not None else {r["tool"] for r in records}
     groups = {}
     for record in records:
@@ -236,7 +280,7 @@ def match(records, out, sample, seed, granularity="site", pta="andersen",
             continue
         group = groups.setdefault((benchmark(record), record["bug_type"]), {})
         if (record.get("context_mode", "sensitive") != context_mode or
-                record.get("context_limit", 3) != context_limit):
+                canonical_context_limit(record.get("context_limit", 3)) != context_limit):
             continue
         if record["tool"] == "usetracessa" and not all(
                 record.get(name) == value for name, value in
@@ -283,8 +327,8 @@ def match(records, out, sample, seed, granularity="site", pta="andersen",
                         details = json.loads(Path(run["details"]).read_text())
                         if run["tool"] == "saber" and not isinstance(details.get("BugTypes"), list):
                             raise ValueError("missing Saber BugTypes array")
-                        sites = (saber_locations(run, details) if run["tool"] == "saber"
-                                 else ir_locations(run, details))
+                        sites = (saber_locations(run, details, path_maps) if run["tool"] == "saber"
+                                 else ir_locations(run, details, path_maps))
                         has_alerts = (any(b.get("Valid", True) for kind in details["BugTypes"]
                                           for b in kind.get("Reports", [])) if run["tool"] == "saber"
                                       else bool(details["findings"]))
@@ -296,6 +340,12 @@ def match(records, out, sample, seed, granularity="site", pta="andersen",
                     except (OSError, ValueError, KeyError, TypeError):
                         state = "PE"
             states[column], locations[column] = state, sites
+        # A legacy basename cannot establish which source directory it names,
+        # even when every tool dropped that information. Keep positives but
+        # require qualified paths before claiming complete matching coverage.
+        for column, sites in locations.items():
+            if states[column] == "OK" and any("/" not in site.rsplit(":", 1)[0] for site in sites):
+                states[column] = "AMB"
         # Saber has no SMT UAF client; a global SMT column is not required here.
         required = [c for c in columns if not (c == "saber/smt" and key[1] == "use-after-free")]
         complete = bool(required) and all(states[c] == "OK" for c in required)
@@ -336,6 +386,7 @@ def match(records, out, sample, seed, granularity="site", pta="andersen",
                      svfg_mssa=svfg_mssa, context_mode=context_mode, context_limit=context_limit,
                      path_feasibility=path_feasibility, ir_budgets=budgets or {},
                      saber_budgets=saber_budgets or {},
+                     source_prefix_maps=path_maps,
                      lotus_commit=records[0].get("lotus_commit") if records else None,
                      lotus_dirty=records[0].get("lotus_dirty") if records else None)
     out.with_suffix(".selection.json").write_text(json.dumps(selection, indent=2) + "\n")
@@ -370,6 +421,10 @@ def main(argv=None):
                               help="Call-string depth, or unlimited")
     match_parser.add_argument("--tools", default="usetracessa,ufg,saber",
                               help="Expected tools; missing runs remain NA")
+    match_parser.add_argument("--source-prefix-map", action="append", type=prefix_map,
+                              default=[], metavar="OLD=NEW",
+                              help="Map producer source roots to one namespace (repeatable); "
+                                   "paths otherwise retain directories, ambiguous legacy basenames are AMB")
     add_analysis_options(match_parser)
     args = parser.parse_args(argv)
     try:
@@ -379,9 +434,9 @@ def main(argv=None):
     if args.command == "oracle":
         return oracle(records)
     try:
-        limit = None if args.context_limit == "unlimited" else int(args.context_limit)
-        if limit is not None and limit < 0:
-            raise ValueError
+        limit = canonical_context_limit(args.context_limit)
+        if len({old for old, _ in args.source_prefix_map}) != len(args.source_prefix_map):
+            parser.error("duplicate source path prefix mappings")
     except ValueError:
         parser.error("--context-limit must be a nonnegative integer or unlimited")
     requested = args.tools.split(",")
@@ -391,7 +446,8 @@ def main(argv=None):
     return match(records, args.out, args.sample, args.seed, args.granularity, args.pta,
                  args.pass_calls == "true", args.temporal_graph, args.svfg_mssa,
                  args.context, limit, requested, args.path_feasibility,
-                 selected_limits(args, "usetracessa"), selected_limits(args, "saber"))
+                 selected_limits(args, "usetracessa"), selected_limits(args, "saber"),
+                 args.source_prefix_map)
 
 
 if __name__ == "__main__":

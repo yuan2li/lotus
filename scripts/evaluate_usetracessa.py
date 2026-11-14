@@ -51,6 +51,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from usetracessa_results import canonical_context_limit
 
 ROOT = Path(__file__).resolve().parents[1]
 PRESETS = Path(__file__).resolve().parent / "eval_presets.json"
@@ -93,7 +94,13 @@ def budget_value(text):
 
 def context_limit_value(text):
     # Unlike resource budgets, context depth 0 retains its legacy meaning.
-    return None if text == "unlimited" else budget_value(text)
+    try:
+        value = canonical_context_limit(text)
+        if value is not None and value > 2**64 - 1:
+            raise ValueError("context_limit exceeds the tool's unsigned 64-bit range")
+        return value
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
 
 
 def key_values(line):
@@ -395,6 +402,7 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
                  context_limit, budgets=None, context_mode="sensitive", saber_budgets=None,
                  details_dir=None, witnesses=False, benchmark_info=None,
                  path_feasibility=False):
+    context_limit = canonical_context_limit(context_limit)
     tool, bug_type, bc_path = task["tool"], task["bug_type"], task["bc_path"]
     details = details_dir / details_name(index, task) if details_dir else None
     cmd = build_cmd(task, binaries, context_limit, budgets, context_mode,
@@ -419,6 +427,7 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
     if SPEC_LOAD_FAILURE in execution["stderr"]:
         status = "SPEC_ERROR"
     record = {
+        **parsed,
         "task_id": index, "repeat": task["repeat"], "tool": tool, "bug_type": bug_type,
         **(benchmark_info or {}),
         "smt_mode": task["smt_mode"],
@@ -456,7 +465,6 @@ def execute_task(index, task, timeout_s, mem_limit_gb, binaries,
                                      parsed.get("model_complete") is False),
         "wall_time_s": execution["wall_time_s"],
         "max_rss_mb": execution["max_rss_mb"],
-        **parsed,
     }
     if status != "SUCCESS":
         record["stdout_tail"] = execution["stdout"][-2000:]

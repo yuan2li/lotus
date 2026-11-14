@@ -73,7 +73,9 @@ def main(argv=None):
                 run_step(name, [str(tests / name)], directory)
         fixture = directory / "fixture.ll"
         lines = FIXTURE.splitlines()
-        add_debug_info(lines, "fixture.c")
+        # Supply a qualified source identity; basename-only legacy locations
+        # cannot establish cross-tool matching coverage.
+        add_debug_info(lines, "validation/fixture.c")
         fixture.write_text("\n".join(lines) + "\n")
         results = directory / "runs.json"
         run_step("evaluate", python + [str(ROOT / "scripts/evaluate_usetracessa.py"),

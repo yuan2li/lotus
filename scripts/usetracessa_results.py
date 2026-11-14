@@ -1,12 +1,27 @@
 """Shared experiment identity and backward-compatible result loading."""
 import argparse
 import json
+import re
 from pathlib import Path
 
 IR_BUDGETS = ("max-product-states", "max-summary-pairs")
 SABER_BUDGETS = ("max-forward-items", "solver-timeout-ms")
 STATUS_LABELS = {"SUCCESS": "OK", "TIMEOUT": "TO", "OOM": "OOM",
                  "INCOMPLETE": "INC", "PARSE_ERROR": "PE", "SPEC_ERROR": "SPEC"}
+
+
+def canonical_context_limit(value):
+    """JSON null and historical unbounded spellings share one identity.
+
+    Depth zero is a bounded configuration, never a resource-budget sentinel.
+    """
+    if value is None or (isinstance(value, str) and value in ("unlimited", "unbounded")):
+        return None
+    if type(value) is int and value >= 0:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        return int(value)
+    raise ValueError("context_limit must be a nonnegative integer or unlimited")
 
 
 def budget_value(text):
@@ -61,6 +76,7 @@ def load_results(paths):
         file_commit = metadata.get("lotus_commit")
         for original in source:
             record = dict(original)
+            record["context_limit"] = canonical_context_limit(record.get("context_limit", 3))
             commit = record.get("lotus_commit", file_commit)
             if file_commit and commit and file_commit != commit:
                 raise ValueError(f"conflicting record/file commit in {path}")

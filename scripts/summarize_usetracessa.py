@@ -43,7 +43,8 @@ from pathlib import Path
 import statistics
 import sys
 from usetracessa_results import (add_analysis_options, canonical_limits,
-                                feasibility_enabled, load_results, selected_limits)
+                                canonical_context_limit, feasibility_enabled,
+                                load_results, selected_limits)
 
 CONFIG_KEYS = ("benchmark", "tool", "bug_type", "smt_mode", "object_mode",
                "temporal_graph", "object_granularity", "svfg_mssa", "pta", "object_scope",
@@ -95,6 +96,7 @@ def aggregate(records):
             if name not in record or (record[name] is None and name != "context_limit"):
                 configuration[name] = value
         configuration["path_feasibility"] = feasibility_enabled(record)
+        configuration["context_limit"] = canonical_context_limit(configuration["context_limit"])
         configuration["search_limits"] = canonical_limits(record["tool"], record.get("search_limits"))
         key = tuple(configuration[name] for name in CONFIG_KEYS)
         groups.setdefault(key, []).append(record)
@@ -136,6 +138,7 @@ def find(rows, benchmark, bug_type, tool, **config):
         defaults.update(object_mode="batch", temporal_graph="sparse")
     defaults.update(path_feasibility=False, search_limits=canonical_limits(tool))
     wanted = dict(defaults, **config)
+    wanted["context_limit"] = canonical_context_limit(wanted["context_limit"])
     if isinstance(wanted["search_limits"], dict):
         wanted["search_limits"] = canonical_limits(tool, wanted["search_limits"])
     for row in rows.values():
@@ -211,9 +214,7 @@ def main(argv=None):
     add_analysis_options(parser)
     args = parser.parse_args(argv)
     try:
-        limit = None if args.context_limit == "unlimited" else int(args.context_limit)
-        if limit is not None and limit < 0:
-            raise ValueError
+        limit = canonical_context_limit(args.context_limit)
     except ValueError:
         parser.error("--context-limit must be a nonnegative integer or unlimited")
     try:
